@@ -4,3 +4,26 @@
  * This is a general purpose Gradle build.
  * Learn more about Gradle by exploring our Samples at https://docs.gradle.org/8.13/samples
  */
+
+plugins {
+    `java-library`
+}
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+dependencies {
+    // api, not implementation: euclid and mecano types (RigidBodyTransform, ReferenceFrame,
+    // RigidBodyBasics) appear in this package's own public signatures.
+    api(libs.euclid)
+    api(libs.euclid.frame)
+    api(libs.euclid.geometry)
+    api(libs.mecano)
+}

@@ -55,7 +55,8 @@ placeholder (see `git log`: "add all files as empty for now"). The two intended 
 points are:
 
 - `us.ihmc.alexMocap.CalibrationRunner` — PR1 definition of done is
-  `--gate g1 --input <csv>` printing a per-cluster pass/fail table, exit non-zero on fail
+  `--gate g1 --input <csv>` printing a per-cluster pass/fail table, exit non-zero on fail.
+  The CSV it eats is what `MocapFrameRecorder` writes; `gates` is the remaining piece.
 - `us.ihmc.alexMocap.ReplayRunner` — PR3
 
 Once either has a `main`, add an `application` plugin block or a `JavaExec` task and
@@ -115,6 +116,101 @@ imports the other, which FRAMEWORK.md §19 forbids.
 6. **`CalibrationResultIO.read(path, markerSet)` is the one to use in a pipeline.**
    `readWithDenseMarkerSet` invents indices from file order and is for inspection tools only
    — its `MarkerId`s are not interchangeable with a running session's.
+
+### `us.ihmc.alexMocap.mocap` — getting frames in
+
+| Type | Role |
+|---|---|
+| `MocapSource` | interface: `read(frame)` + `isFinished()` |
+| `MocapFrameRecorder` | writes a CSV log |
+| `CsvReplayMocapSource` | reads back exactly what the recorder wrote |
+| `MarkerLabeling` | Motive streaming id → `MarkerId` |
+| `NatNetMocapSource` | live capture, consumer end (see below) |
+
+The recorder/replay pair is the whole point: capture once at the gantry, then re-run every
+gate and the whole calibration in CI off the file with no cameras in the room. Nothing in
+this repository's tests needs hardware.
+
+Log format — one header comment, one schema row, one line per frame:
+
+```
+# alex-mocap frame log, format 1
+# invisible markers are recorded as NaN
+timestamp_ns,PELVIS_1_x,PELVIS_1_y,PELVIS_1_z,PELVIS_2_x,PELVIS_2_y,PELVIS_2_z
+1000000000,0.0612,-0.0344,0.0891,NaN,NaN,NaN
+```
+
+Visibility is encoded in the coordinates, not a separate flag: a visible marker always has a
+finite position (`MarkerObservation.setVisible` rejects anything else), so there is no second
+column that can disagree with the first three. NaN also plots as a gap in every tool you'll
+open this with, where 0.0 would plot as the marker jumping to the world origin.
+
+### Watch out for — `mocap`
+
+1. **Write the loop as `while (!source.isFinished()) { if (source.read(frame)) … }`.** The
+   shorter `while (source.read(frame))` works perfectly on a replay and then exits on the
+   first dropped packet against live capture. "Nothing right now" and "nothing ever again"
+   are different states; that's why the interface has two methods.
+2. **`NatNetMocapSource` keeps only the latest frame.** If Motive delivers faster than you
+   read, the older frame is overwritten and `getDroppedFrameCount()` increments. That's
+   right for a control loop and *wrong for logging* — **check the drop count after any
+   capture you intend to calibrate from.** A log with holes still produces a confident
+   calibration, just from fewer captures than you think.
+3. **`CsvReplayMocapSource.open(path, markerSet)` is the one to use in a pipeline.**
+   `openWithHeaderMarkerSet` derives indices from column order, for inspection tools only.
+   A name or ordering mismatch is refused — rebinding by column position would assign
+   measurements to the wrong markers and produce poses that are wrong and look healthy.
+4. **`MarkerLabeling` cannot catch a marker assigned to the wrong link.** G1 catches a label
+   swap *within* a cluster, because trading places changes inter-marker distances. A thigh
+   marker labelled as a shank marker gives you a clean calibration of the wrong thing.
+   That assignment is taken on trust from Motive's rigid-body definitions (FRAMEWORK §21.5).
+   Do check `getUnfedMarkers()` at startup — a marker no Motive id feeds can never become
+   visible, so its cluster can never reach three.
+5. **`readAll()` is for tests and short captures.** It holds every frame in memory.
+
+### `NatNetMocapSource` — what is and isn't implemented
+
+**Implemented and tested:** the handoff between the NatNet callback thread and the control
+thread — labelling, latest-frame semantics, dropped-frame and unlabelled-marker accounting,
+thread safety, and the guarantee that a marker Motive stops reporting comes back explicitly
+not-visible rather than holding its last position.
+
+**Not implemented:** the NatNet wire protocol. This class does not open a socket. It is
+*driven* — a NatNet client calls `onFrameReceived(timestampNs, motiveIds, positionsXYZ,
+count)` and this class does the rest. The intended client is `us.ihmc.mocap`'s in
+ihmc-open-robotics-software (which is why FRAMEWORK §19 nests this project under
+`us.ihmc.alexMocap` — to avoid a split package with it), and that artifact is not on this
+build's classpath.
+
+There is deliberately **no `connect()` method that throws**. A method that compiles and fails
+at runtime reads as working code; the seam should be visible at the call site. Wiring it is a
+short adapter in whichever module has the client.
+
+Per PR_PLAN this class gets no unit test for the connection itself — a mocked NatNet client
+tests the mock.
+
+#### Manual smoke test
+
+1. Start Motive, load the session calibration, confirm the rigid bodies are defined and
+   streaming (Data Streaming pane → NatNet enabled, note the transmission type and interface).
+2. Build a `MarkerLabeling` from Motive's streaming ids to your marker names. Log
+   `getUnfedMarkers()` — it must be empty before you go further.
+3. Wire the client's per-frame callback to `onFrameReceived` and construct
+   `NatNetMocapSource`.
+4. Record 60 s at rest into a CSV via `MocapFrameRecorder`. Then check, in order:
+   - `getFramesReceived()` ≈ 60 × the Motive rate. Materially short means packets are being
+     dropped on the wire, not by this class.
+   - `getDroppedFrameCount()` is 0. Non-zero while recording means the recorder is not
+     keeping up.
+   - `getUnlabelledMarkerCount()` is steady and small. If it is comparable to your labelled
+     marker count, the labelling ids are wrong.
+   - Every cluster shows its full marker count visible for the whole 60 s.
+5. Replay the CSV through `CsvReplayMocapSource` and confirm the frame count matches. From
+   here on, nothing needs the cameras.
+6. That 60 s of static data is also the per-axis σ measurement FRAMEWORK §20.1 asks for, and
+   every threshold downstream is expressed in terms of it. Take the per-axis standard
+   deviation of each marker's reconstructed position and check the anisotropy — the weak axis
+   will point toward the missing camera side.
 
 ### `us.ihmc.alexMocap.registration` — the primitive
 
@@ -249,13 +345,15 @@ Reports land in `build/reports/tests/test/index.html`; machine-readable results 
 `build/test-results/test/*.xml`. `testLogging` is configured to dump full stack traces on
 failure, so a CI log is enough to diagnose without fetching the report.
 
-Currently 33 tests, no external resources, no display:
+Currently 56 tests, no external resources, no display, no hardware:
 
 | Class | Covers |
 |---|---|
 | `registration.RigidBodyRegistrationTest` | exact recovery, reflection guard, rank deficiency, singular-value ordering, count normalisation, `σ/√N` noise scaling, below-minimum NaN, allocation-free, capacity growth |
 | `core.CoreDataTypesTest` | dense marker sets, cross-marker-set rejection, NaN-when-unset, visible counts, capture skew, joint-order checking, `K_ij` bookkeeping, no-velocity-by-reflection, allocation-free frame loop |
 | `core.CalibrationResultIOTest` | exact JSON round trip incl. byte-identical rewrite, `Δ` over 1000 random transforms, NaN survival, unknown-marker rejection, format version, parse errors |
+| `mocap.CsvRoundTripTest` | exact CSV round trip incl. visibility over 200 frames at 20% occlusion, self-describing header, marker-set and ordering mismatch, corrupt lines, untimestamped frames, comments |
+| `mocap.MocapSourceTest` | sparse Motive ids, labelling bijection, unfed markers, no stale positions between live frames, dropped-frame accounting, concurrent producer/consumer, allocation-free live handoff |
 | `PackageDependencyTest` | the FRAMEWORK.md §19 dependency table, by scanning compiled class files |
 
 ### Reading the tests
@@ -279,6 +377,11 @@ Two conventions carried from `PR_PLAN.md`, worth knowing before you change one:
   | NaN written as `0.0` instead of `null` | never-observed and world-tilt tests |
   | `Δ` written as the full 4×4 | `Δ` round trip |
   | allocation escaping from `MocapFrame.clear()` | 320,000 bytes |
+  | live source skips `staging.clear()` (stale positions persist) | no-carry-over test |
+  | CSV reader ignores header/marker-set mismatch | mismatch test |
+  | partially-NaN triple treated as occluded | corrupt-line test |
+  | dropped frames not counted | drop-count and concurrency tests |
+  | recorder accepts untimestamped frames | untimestamped test |
   | `registration → core` import added | both dependency tests |
 
   EJML really does return singular values unordered — the sort is not a theoretical concern.

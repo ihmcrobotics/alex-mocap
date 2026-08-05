@@ -3,3 +3,10 @@
 
 # Ignore Gradle build output directory
 build
+
+# Eclipse/Buildship/jdtls project metadata. Machine-specific (absolute JDK and jdtls
+# bundle paths) and regenerated on every IDE import -- do not commit.
+.project
+.classpath
+.settings/
+bin/

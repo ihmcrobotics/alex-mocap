@@ -22,9 +22,31 @@ Verify with:
 ./gradlew dependencies --configuration compileClasspath   # inspect resolved deps
 ```
 
-Note: `org.gradle.configuration-cache=true` is set in `gradle.properties`. Editing
-`build.gradle.kts` or `libs.versions.toml` invalidates the cache and the next build
-recalculates the task graph — that is expected, not a failure.
+The configuration cache is deliberately **not** enabled in `gradle.properties` — it breaks
+IDE import (see *IDE / LSP* below). `org.gradle.caching=true` (the build cache) is on
+instead; it has no such interaction. Pass `--configuration-cache` per invocation if you
+want it for a CLI build.
+
+## IDE / LSP
+
+The project imports as a plain Gradle project — open the repo root and let jdtls (or
+Eclipse/Buildship, or IntelliJ) run the import. Nothing to configure by hand. `.project`,
+`.classpath`, `.settings/`, and `bin/` are generated per machine and are gitignored; do
+not commit them.
+
+To sanity-check the model the IDE will receive, without an IDE:
+
+```bash
+printf "allprojects { apply plugin: 'eclipse' }\n" > /tmp/ec.gradle
+./gradlew -I /tmp/ec.gradle eclipse      # must succeed
+grep javanature .project                 # must be present
+```
+
+If the LSP shows no symbols, reset the jdtls workspace and reopen:
+
+```bash
+rm -rf ~/.cache/nvim/jdtls/alex-mocap/workspace
+```
 
 ## Entry points
 
@@ -32,8 +54,8 @@ There are none yet. As of this writing all 53 files under `src/main/java` are em
 placeholders (see `git log`: "add all files as empty for now"), so `./gradlew build`
 succeeds but produces an effectively empty jar. The two intended entry points are:
 
-- `us.ihmc.CalibrationRunner`
-- `us.ihmc.ReplayRunner`
+- `us.ihmc.alexMocap.CalibrationRunner`
+- `us.ihmc.alexMocap.ReplayRunner`
 
 Once either has a `main`, add an `application` plugin block or a `JavaExec` task and
 document the invocation here.
@@ -54,6 +76,24 @@ They are `api` rather than `implementation` because euclid and mecano types
 own public signatures.
 
 ## Gotchas
+
+**Do not enable `org.gradle.configuration-cache` in `gradle.properties`.** Buildship —
+which jdtls, Eclipse, and IntelliJ all use to import Gradle projects — injects
+`apply plugin: "eclipse"` through an init script. That plugin's `GenerateEclipseClasspath`
+task holds a `SourceSetContainer`, which the configuration cache cannot serialize, so the
+IDE's model request fails. The failure is silent from the editor's side: the project
+imports with the Gradle nature but no Java nature, and the LSP reports
+`Error in Java Model (code 969): alex-mocap does not exist` in
+`~/.cache/nvim/jdtls/alex-mocap/workspace/.metadata/.log` while showing you an
+apparently-fine, symbol-free buffer. `./gradlew build` stays green throughout.
+
+**The package directory must be a legal Java identifier.** This package originally lived
+in `src/main/java/us/ihmc/alex-mocap/`; hyphens are not valid in Java identifiers, so
+`us.ihmc.alex-mocap` is not a package any compiler or LSP can form. It went unnoticed
+because every file was 0 bytes — an empty compilation unit has no `package` line to
+reject, so `compileJava` passed. The directory is now `alexMocap` (camelCase, matching
+IHMC house style: `us.ihmc.robotDataLogger`, `us.ihmc.commonWalkingControlModules`). Keep
+the artifact/repo name `alex-mocap`; only the Java package segment is constrained.
 
 **`artifactory.ihmc.us` is not reachable off-VPN, and fails silently.** Every path under
 it returns HTTP **200 with a zero-byte body** — including paths that do not exist. It does

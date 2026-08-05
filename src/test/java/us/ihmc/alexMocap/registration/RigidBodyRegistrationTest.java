@@ -4,11 +4,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.lang.management.ManagementFactory;
 import java.util.Random;
 
 import org.junit.jupiter.api.Test;
 
+import us.ihmc.alexMocap.AllocationMeasurement;
 import us.ihmc.euclid.matrix.RotationMatrix;
 import us.ihmc.euclid.tools.EuclidCoreRandomTools;
 import us.ihmc.euclid.transform.RigidBodyTransform;
@@ -399,27 +399,13 @@ public class RigidBodyRegistrationTest
     * primitive once per marked cluster per frame at 200 Hz; an allocation per call is an
     * allocation per cluster per frame.
     * <p>
-    * The measurement validates itself first: a loop that is known to allocate must read as
-    * allocating, otherwise a zero from the real loop would prove nothing.
+    * The measurement validates itself and takes the minimum over several batches; see
+    * {@link AllocationMeasurement} for why a single window is not enough.
     * </p>
     */
    @Test
    public void testRegistrationIsAllocationFree()
    {
-      com.sun.management.ThreadMXBean threadBean = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
-      assertTrue(threadBean.isThreadAllocatedMemorySupported(), "This JVM cannot measure per-thread allocation; the test would be vacuous.");
-      threadBean.setThreadAllocatedMemoryEnabled(true);
-      long threadId = Thread.currentThread().getId();
-
-      // Self-check on the meter.
-      long beforeControl = threadBean.getThreadAllocatedBytes(threadId);
-      Object[] sink = new Object[1024];
-      for (int i = 0; i < 1024; i++)
-         sink[i] = new Point3D(i, i, i);
-      long controlAllocation = threadBean.getThreadAllocatedBytes(threadId) - beforeControl;
-      assertTrue(controlAllocation > 0, "The allocation meter reported zero for a loop that allocates 1024 Point3Ds.");
-      assertTrue(sink[0] != null);
-
       Random random = new Random(4669L);
       int markerCount = 6;
       RigidBodyRegistration registration = new RigidBodyRegistration(markerCount);
@@ -442,15 +428,9 @@ public class RigidBodyRegistrationTest
          targetPoints[3 * j + 2] = scratch.getZ();
       }
 
-      // Warm up: class loading, JIT, and EJML's own lazily sized internals all allocate on the
-      // first passes and none of that is what this test is about.
-      runRegistrations(registration, result, sourcePoints, targetPoints, markerCount, 20_000);
+      AllocationMeasurement.assertAllocationFree("10,000 registrations",
+                                                 () -> runRegistrations(registration, result, sourcePoints, targetPoints, markerCount, 10_000));
 
-      long before = threadBean.getThreadAllocatedBytes(threadId);
-      runRegistrations(registration, result, sourcePoints, targetPoints, markerCount, 10_000);
-      long allocated = threadBean.getThreadAllocatedBytes(threadId) - before;
-
-      assertEquals(0L, allocated, "10,000 registrations allocated " + allocated + " bytes after warmup");
       assertTrue(result.wasSuccessful());
    }
 

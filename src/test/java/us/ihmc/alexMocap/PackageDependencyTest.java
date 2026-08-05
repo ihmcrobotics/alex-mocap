@@ -157,7 +157,7 @@ public class PackageDependencyTest
          int start = index + ROOT.length();
          int end = start;
 
-         while (end < contents.length() && (Character.isJavaIdentifierPart(contents.charAt(end)) || contents.charAt(end) == '/'))
+         while (end < contents.length() && isInternalNameCharacter(contents.charAt(end)))
             end++;
 
          String remainder = contents.substring(start, end);
@@ -168,6 +168,22 @@ public class PackageDependencyTest
       }
 
       return packages;
+   }
+
+   /**
+    * Characters a JVM internal class name can contain, enumerated rather than delegated to
+    * {@link Character#isJavaIdentifierPart}.
+    * <p>
+    * {@code isJavaIdentifierPart} returns {@code true} for ignorable control characters, including
+    * {@code } -- which is exactly the separator the compiler uses inside a record's
+    * {@code ObjectMethods} bootstrap string. Using it here glued that string onto the class name
+    * before it and invented package names like
+    * {@code core/CalibrationResult$ProvenanceurdfLjava/lang}.
+    * </p>
+    */
+   private static boolean isInternalNameCharacter(char c)
+   {
+      return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '$' || c == '/';
    }
 
    private static Path mainClassesDirectory() throws URISyntaxException

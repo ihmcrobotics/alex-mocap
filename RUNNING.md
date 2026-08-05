@@ -63,8 +63,62 @@ document the invocation here.
 
 ## What is implemented
 
-`us.ihmc.alexMocap.registration` — the registration primitive of FRAMEWORK.md §2, consumed
-by F5, F6, G1 and G4. Two classes:
+### `us.ihmc.alexMocap.core` — the data model
+
+The types every other package speaks in. Depends on Euclid and nothing else, not even the
+other packages here.
+
+| Type | Holds | Mutable? |
+|---|---|---|
+| `MarkerId` | marker name + dense index | immutable |
+| `MarkerObservation` | one marker's world position + visibility | reusable |
+| `MocapFrame` | timestamp + one observation per marker | reusable |
+| `MarkerCluster` | link name + member markers | immutable |
+| `EncoderSample` | timestamp + `q` + joint order | reusable |
+| `Capture` | a paired `MocapFrame` + `EncoderSample` | reusable |
+| `ClusterLayout` | `^i p̂_ij` per marker + `K_ij` | mutable (A′ overwrites) |
+| `CalibrationResult` | layouts + `Δ` + provenance | mutable |
+| `CalibrationResultIO` | JSON read/write | static |
+| `GroundTruthSample` | CoM + pelvis pose + per-link `σ₃`/visible/refusal | reusable |
+
+The split is deliberate: configuration types are immutable, and anything the 200 Hz loop
+touches is preallocated and overwritten. `MarkerId.createDenseSet(...)` builds the session
+marker set once; every `MocapFrame` shares it and addresses observations by
+`MarkerId.getIndex()`, so a per-frame marker lookup is an array read.
+
+`CalibrationResult` lives here rather than in `calibration` because it is the one object the
+offline calibrator and the runtime loop both touch. Anywhere else and one of those packages
+imports the other, which FRAMEWORK.md §19 forbids.
+
+### Watch out for — `core`
+
+1. **Marker indices are only meaningful within one marker set.** Two sets built separately
+   assign index 1 to different markers. `MocapFrame.get(MarkerId)` verifies identity and
+   throws rather than trusting the index, but the fix is to build the set once with
+   `createDenseSet` and pass that same list everywhere.
+2. **Unset means NaN, everywhere.** An invisible marker, an unsolved layout, an unmeasured
+   world tilt, a fresh `GroundTruthSample` — all NaN, never zero. Zero is a legal joint
+   angle, a legal position, and a legal tilt; NaN is the only value that cannot be mistaken
+   for a measurement. Don't "helpfully" default any of them.
+3. **Timestamps are `long` nanoseconds in whatever epoch the source defines.** The type does
+   not care which epoch; it cares that mocap and encoders share one. Read
+   `Capture.getTimestampSkewNanoseconds()` — a mispaired capture is valid mocap plus valid
+   encoders at the wrong configuration, and nothing else about it looks wrong
+   (FRAMEWORK §18.3).
+4. **`K_ij` travels with the layout for a reason.** A marker seen in 3 of 30 captures has a
+   position ~3× noisier than one seen in all 30, and the position itself does not say so.
+   Check `ClusterLayout.getMinimumObservationCount()` before trusting a layout.
+5. **`GroundTruthSample` has no velocity field and must not grow one.** FRAMEWORK §13:
+   velocity is an offline second pass over the logged poses. A runtime velocity slot would
+   get filled by differencing, at ~0.13 m/s of noise against a 0.025 m/s estimator. A test
+   asserts by reflection that no accessor here names one.
+6. **`CalibrationResultIO.read(path, markerSet)` is the one to use in a pipeline.**
+   `readWithDenseMarkerSet` invents indices from file order and is for inspection tools only
+   — its `MarkerId`s are not interchangeable with a running session's.
+
+### `us.ihmc.alexMocap.registration` — the primitive
+
+The registration primitive of FRAMEWORK.md §2, consumed by F5, F6, G1 and G4. Two classes:
 
 - `RigidBodyRegistration` — Umeyama closed-form pose from point correspondences. Stateful,
   **not thread safe** (owns preallocated EJML scratch), allocation-free in steady state.
@@ -73,6 +127,35 @@ by F5, F6, G1 and G4. Two classes:
   count, reflection-corrected flag). Reports numbers, decides nothing.
 
 Occlusion needs no special handling: an unseen marker is a correspondence you never add.
+
+### Watch out for — `registration`
+
+1. **`σ₃` is comparable across marker *counts*, not across marker *geometries*.** `H` is
+   normalised by `L`, so occluding a marker no longer drops `σ₃` just because the sum got
+   shorter. It does still move `σ₃`, because losing a marker genuinely changes the cluster's
+   shape — and no normalisation can or should hide that. So `σ₃` is a fair conditioning
+   number frame to frame, but a drop in it does **not** by itself mean "a marker occluded".
+   Log the visible count alongside it (FRAMEWORK §9) and read the two together.
+2. **`σ` has units of length², not length.** They are mean-squared spreads. A cluster with
+   120 mm spread reports `σ ≈ 0.003`, not `0.12`. Pick refusal thresholds accordingly — this
+   is the easiest way to set one off by three orders of magnitude.
+3. **`compute` returning `true` is not a quality claim.** Three collinear markers give a
+   perfectly well-formed rotation and `σ₂ = σ₃ = 0`. Nothing in the transform betrays it.
+   Check `σ₃` — that is the whole of FRAMEWORK §18.1.
+4. **Don't test `σ₃ == 0`.** With real noise a collinear cluster reports `σ₃` strictly
+   positive but ~4 orders below `σ₁`. Compare the *ratio*, or compare against your measured
+   per-axis noise.
+5. **`wasReflectionCorrected()` firing is normal, not a fault.** On a near-planar cluster
+   the sign of the raw `U Vᵀ` is a coin flip; it fires on ~50% of frames. It is a diagnostic
+   for *how planar your cluster is*, not an error flag.
+6. **One instance per caller, and it is not thread safe.** It owns preallocated EJML scratch.
+   Sharing one across two solvers or two threads silently corrupts both.
+7. **Allocation-free only once capacity is reached.** `addCorrespondence` grows by doubling,
+   which allocates. Size the constructor to your worst case — markers per cluster for F6,
+   `links × markers × captures` for F5.
+8. **No frame checking.** `addCorrespondence` takes bare `Point3DReadOnly` and will happily
+   accept a source point in the wrong frame. Frame safety is F8's job (FRAMEWORK §11), and
+   it lives above this class, not in it.
 
 ```java
 RigidBodyRegistration registration = new RigidBodyRegistration(markerCount);
@@ -166,11 +249,13 @@ Reports land in `build/reports/tests/test/index.html`; machine-readable results 
 `build/test-results/test/*.xml`. `testLogging` is configured to dump full stack traces on
 failure, so a CI log is enough to diagnose without fetching the report.
 
-Currently 11 tests, no external resources, no display:
+Currently 33 tests, no external resources, no display:
 
 | Class | Covers |
 |---|---|
 | `registration.RigidBodyRegistrationTest` | exact recovery, reflection guard, rank deficiency, singular-value ordering, count normalisation, `σ/√N` noise scaling, below-minimum NaN, allocation-free, capacity growth |
+| `core.CoreDataTypesTest` | dense marker sets, cross-marker-set rejection, NaN-when-unset, visible counts, capture skew, joint-order checking, `K_ij` bookkeeping, no-velocity-by-reflection, allocation-free frame loop |
+| `core.CalibrationResultIOTest` | exact JSON round trip incl. byte-identical rewrite, `Δ` over 1000 random transforms, NaN survival, unknown-marker rejection, format version, parse errors |
 | `PackageDependencyTest` | the FRAMEWORK.md §19 dependency table, by scanning compiled class files |
 
 ### Reading the tests
@@ -180,23 +265,43 @@ Two conventions carried from `PR_PLAN.md`, worth knowing before you change one:
 - **Fixed seeds, loose thresholds.** Every randomised test seeds its `Random` explicitly and
   asserts a threshold several times the theoretical value, with that value stated in a
   comment. A test that flakes gets disabled and a disabled test is worse than none.
-- **The thresholds are load-bearing.** Each of the guards in `RigidBodyRegistration` was
-  mutation-checked: remove the determinant repair and the reflection test throws
-  `NotARotationMatrixException`; remove `sortDescending()` and `σ₁` comes back as the
-  *smallest* singular value (EJML genuinely returns them unordered — this is not a
-  theoretical concern); drop the `1/L` on `H` and the count-normalisation test reports a
-  25% shift; allocate one `double[4]` inside `compute` and the allocation test reports
-  480,000 bytes. If you loosen a threshold, re-run that check.
+- **The guards are load-bearing, and were checked by breaking them.** Every one of these was
+  mutated and the intended test confirmed to fail:
 
-### The allocation test
+  | Mutation | Caught by |
+  |---|---|
+  | determinant repair removed (Arun, not Umeyama) | `NotARotationMatrixException` |
+  | `sortDescending()` skipped | `σ₁` returns as the *smallest* singular value |
+  | `1/L` dropped from `H` | count normalisation: 25.0% shift |
+  | `double[4]` allocated in `compute` | 480,000 bytes |
+  | `MocapFrame` trusts the index instead of verifying identity | cross-marker-set test |
+  | invisible marker keeps its last position | NaN test |
+  | NaN written as `0.0` instead of `null` | never-observed and world-tilt tests |
+  | `Δ` written as the full 4×4 | `Δ` round trip |
+  | allocation escaping from `MocapFrame.clear()` | 320,000 bytes |
+  | `registration → core` import added | both dependency tests |
 
-`testRegistrationIsAllocationFree` measures with `com.sun.management.ThreadMXBean`
-`getThreadAllocatedBytes` and asserts exactly zero over 10,000 registrations after a 20,000
-iteration warmup. It validates its own meter first — a loop known to allocate 1024
-`Point3D`s must read as allocating — so a zero from the real loop is not vacuous. No JVM
-flags are needed: HotSpot's counter includes the in-progress TLAB, so TLAB batching does
-not hide allocation.
+  EJML really does return singular values unordered — the sort is not a theoretical concern.
+  If you loosen a threshold, re-run the matching mutation.
 
-If this fails after a dependency bump, suspect EJML: the zero depends on
+### The allocation tests
+
+`AllocationMeasurement.assertAllocationFree` measures with `com.sun.management.ThreadMXBean`
+`getThreadAllocatedBytes`, runs the batch five times after warmup, and asserts the
+**minimum** is zero. Not the mean, and not a single window: the JIT recompiles on its own
+schedule and charges that bookkeeping to the running thread, so single-window readings of
+allocation-free code look like `2792, 0, 104, 0, 0`. The minimum is exact rather than
+approximate — if the batch allocated one byte per iteration, no window could read zero.
+
+It validates its own meter first, so a zero is never vacuous. No JVM flags are needed:
+HotSpot's counter includes the in-progress TLAB.
+
+**What it proves.** What the JVM actually allocates — which is the quantity that matters,
+since a scalar-replaced allocation costs the collector nothing. It is *not* a proof that the
+source contains no `new`: injecting `new double[2]` into `MocapFrame.clear()` is invisible
+here because escape analysis removes it, while the same array assigned to a static field
+shows up instantly. Keep hot-path methods small and don't lean on that deliberately.
+
+If the registration one fails after a dependency bump, suspect EJML: the zero depends on
 `SvdImplicitQrDecompose_DDRM` reusing its internals across same-size `decompose` calls, and
 on `getU`/`getV` reshaping rather than reallocating a preallocated 3×3.

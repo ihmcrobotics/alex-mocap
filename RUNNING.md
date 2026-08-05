@@ -50,30 +50,331 @@ rm -rf ~/.cache/nvim/jdtls/alex-mocap/workspace
 
 ## Entry points
 
-There are none yet. As of this writing all 53 files under `src/main/java` are empty
-placeholders (see `git log`: "add all files as empty for now"), so `./gradlew build`
-succeeds but produces an effectively empty jar. The two intended entry points are:
+`us.ihmc.alexMocap.CalibrationRunner` runs a pre-flight gate over a captured mocap log.
 
-- `us.ihmc.alexMocap.CalibrationRunner`
-- `us.ihmc.alexMocap.ReplayRunner`
+```bash
+./gradlew installDist
+./build/install/alex-mocap/bin/alex-mocap --gate g1 --input capture.csv --sigma 0.0003
 
-Once either has a `main`, add an `application` plugin block or a `JavaExec` task and
-document the invocation here.
+# or without installing:
+./gradlew run --args="--gate g1 --input capture.csv --sigma 0.0003"
+```
+
+`--sigma` is the **measured** per-axis mocap noise in metres, and there is deliberately no
+default — see the caveats below. `--help` prints the full option list.
+
+Exit codes: `0` every gate passed, `1` a gate failed **or could not be fully evaluated**,
+`2` usage or I/O error.
+
+Sample output on a capture where a pelvis marker's mount slipped 2 mm partway through:
+
+```
+input    capture.csv
+markers  8
+clusters PELVIS(4), L_THIGH(4)
+sigma    0.3000 mm per axis (measured)
+
+G1 -- rigidity: inter-marker distances within a cluster must be constant to within mocap noise
+  12 pairs over 600 frames, sigma 0.3000 mm, threshold 0.9000 mm (3.0 sigma; noise floor 0.4243 mm = sqrt(2) sigma)
+
+  STATUS         SUBJECT                                      MEASURED    THRESHOLD  SAMPLES
+  FAIL           PELVIS: PELVIS_1-PELVIS_2                   0.9924 mm    0.9000 mm      600
+                 std 0.9924 mm over a 120.8 mm baseline (floor 0.4243 mm)
+  FAIL           PELVIS: PELVIS_1-PELVIS_3                   1.0174 mm    0.9000 mm      600
+                 std 1.0174 mm over a 121.0 mm baseline (floor 0.4243 mm)
+
+  10 passed, 2 failed, 0 not evaluated
+
+  G1: FAIL
+```
+
+Passing checks are summarised by count rather than listed: forty green rows is how a red one
+gets missed.
+
+`us.ihmc.alexMocap.ReplayRunner` (PR3) is still an empty placeholder, as is everything under
+`model`, `frames`, `calibration`, `runtime`, `postprocess`, `scs2`, and the G2/G3/G4 gates.
+
+## What is implemented
+
+### `us.ihmc.alexMocap.core` — the data model
+
+The types every other package speaks in. Depends on Euclid and nothing else, not even the
+other packages here.
+
+| Type | Holds | Mutable? |
+|---|---|---|
+| `MarkerId` | marker name + dense index | immutable |
+| `MarkerObservation` | one marker's world position + visibility | reusable |
+| `MocapFrame` | timestamp + one observation per marker | reusable |
+| `MarkerCluster` | link name + member markers | immutable |
+| `EncoderSample` | timestamp + `q` + joint order | reusable |
+| `Capture` | a paired `MocapFrame` + `EncoderSample` | reusable |
+| `ClusterLayout` | `^i p̂_ij` per marker + `K_ij` | mutable (A′ overwrites) |
+| `CalibrationResult` | layouts + `Δ` + provenance | mutable |
+| `CalibrationResultIO` | JSON read/write | static |
+| `GroundTruthSample` | CoM + pelvis pose + per-link `σ₃`/visible/refusal | reusable |
+
+The split is deliberate: configuration types are immutable, and anything the 200 Hz loop
+touches is preallocated and overwritten. `MarkerId.createDenseSet(...)` builds the session
+marker set once; every `MocapFrame` shares it and addresses observations by
+`MarkerId.getIndex()`, so a per-frame marker lookup is an array read.
+
+`CalibrationResult` lives here rather than in `calibration` because it is the one object the
+offline calibrator and the runtime loop both touch. Anywhere else and one of those packages
+imports the other, which FRAMEWORK.md §19 forbids.
+
+### Watch out for — `core`
+
+1. **Marker indices are only meaningful within one marker set.** Two sets built separately
+   assign index 1 to different markers. `MocapFrame.get(MarkerId)` verifies identity and
+   throws rather than trusting the index, but the fix is to build the set once with
+   `createDenseSet` and pass that same list everywhere.
+2. **Unset means NaN, everywhere.** An invisible marker, an unsolved layout, an unmeasured
+   world tilt, a fresh `GroundTruthSample` — all NaN, never zero. Zero is a legal joint
+   angle, a legal position, and a legal tilt; NaN is the only value that cannot be mistaken
+   for a measurement. Don't "helpfully" default any of them.
+3. **Timestamps are `long` nanoseconds in whatever epoch the source defines.** The type does
+   not care which epoch; it cares that mocap and encoders share one. Read
+   `Capture.getTimestampSkewNanoseconds()` — a mispaired capture is valid mocap plus valid
+   encoders at the wrong configuration, and nothing else about it looks wrong
+   (FRAMEWORK §18.3).
+4. **`K_ij` travels with the layout for a reason.** A marker seen in 3 of 30 captures has a
+   position ~3× noisier than one seen in all 30, and the position itself does not say so.
+   Check `ClusterLayout.getMinimumObservationCount()` before trusting a layout.
+5. **`GroundTruthSample` has no velocity field and must not grow one.** FRAMEWORK §13:
+   velocity is an offline second pass over the logged poses. A runtime velocity slot would
+   get filled by differencing, at ~0.13 m/s of noise against a 0.025 m/s estimator. A test
+   asserts by reflection that no accessor here names one.
+6. **`CalibrationResultIO.read(path, markerSet)` is the one to use in a pipeline.**
+   `readWithDenseMarkerSet` invents indices from file order and is for inspection tools only
+   — its `MarkerId`s are not interchangeable with a running session's.
+
+### `us.ihmc.alexMocap.mocap` — getting frames in
+
+| Type | Role |
+|---|---|
+| `MocapSource` | interface: `read(frame)` + `isFinished()` |
+| `MocapFrameRecorder` | writes a CSV log |
+| `CsvReplayMocapSource` | reads back exactly what the recorder wrote |
+| `MarkerLabeling` | Motive streaming id → `MarkerId` |
+| `NatNetMocapSource` | live capture, consumer end (see below) |
+
+The recorder/replay pair is the whole point: capture once at the gantry, then re-run every
+gate and the whole calibration in CI off the file with no cameras in the room. Nothing in
+this repository's tests needs hardware.
+
+Log format — one header comment, one schema row, one line per frame:
+
+```
+# alex-mocap frame log, format 1
+# invisible markers are recorded as NaN
+timestamp_ns,PELVIS_1_x,PELVIS_1_y,PELVIS_1_z,PELVIS_2_x,PELVIS_2_y,PELVIS_2_z
+1000000000,0.0612,-0.0344,0.0891,NaN,NaN,NaN
+```
+
+Visibility is encoded in the coordinates, not a separate flag: a visible marker always has a
+finite position (`MarkerObservation.setVisible` rejects anything else), so there is no second
+column that can disagree with the first three. NaN also plots as a gap in every tool you'll
+open this with, where 0.0 would plot as the marker jumping to the world origin.
+
+### Watch out for — `mocap`
+
+1. **Write the loop as `while (!source.isFinished()) { if (source.read(frame)) … }`.** The
+   shorter `while (source.read(frame))` works perfectly on a replay and then exits on the
+   first dropped packet against live capture. "Nothing right now" and "nothing ever again"
+   are different states; that's why the interface has two methods.
+2. **`NatNetMocapSource` keeps only the latest frame.** If Motive delivers faster than you
+   read, the older frame is overwritten and `getDroppedFrameCount()` increments. That's
+   right for a control loop and *wrong for logging* — **check the drop count after any
+   capture you intend to calibrate from.** A log with holes still produces a confident
+   calibration, just from fewer captures than you think.
+3. **`CsvReplayMocapSource.open(path, markerSet)` is the one to use in a pipeline.**
+   `openWithHeaderMarkerSet` derives indices from column order, for inspection tools only.
+   A name or ordering mismatch is refused — rebinding by column position would assign
+   measurements to the wrong markers and produce poses that are wrong and look healthy.
+4. **`MarkerLabeling` cannot catch a marker assigned to the wrong link.** G1 catches a label
+   swap *within* a cluster, because trading places changes inter-marker distances. A thigh
+   marker labelled as a shank marker gives you a clean calibration of the wrong thing.
+   That assignment is taken on trust from Motive's rigid-body definitions (FRAMEWORK §21.5).
+   Do check `getUnfedMarkers()` at startup — a marker no Motive id feeds can never become
+   visible, so its cluster can never reach three.
+5. **`readAll()` is for tests and short captures.** It holds every frame in memory.
+
+### `NatNetMocapSource` — what is and isn't implemented
+
+**Implemented and tested:** the handoff between the NatNet callback thread and the control
+thread — labelling, latest-frame semantics, dropped-frame and unlabelled-marker accounting,
+thread safety, and the guarantee that a marker Motive stops reporting comes back explicitly
+not-visible rather than holding its last position.
+
+**Not implemented:** the NatNet wire protocol. This class does not open a socket. It is
+*driven* — a NatNet client calls `onFrameReceived(timestampNs, motiveIds, positionsXYZ,
+count)` and this class does the rest. The intended client is `us.ihmc.mocap`'s in
+ihmc-open-robotics-software (which is why FRAMEWORK §19 nests this project under
+`us.ihmc.alexMocap` — to avoid a split package with it), and that artifact is not on this
+build's classpath.
+
+There is deliberately **no `connect()` method that throws**. A method that compiles and fails
+at runtime reads as working code; the seam should be visible at the call site. Wiring it is a
+short adapter in whichever module has the client.
+
+Per PR_PLAN this class gets no unit test for the connection itself — a mocked NatNet client
+tests the mock.
+
+#### Manual smoke test
+
+1. Start Motive, load the session calibration, confirm the rigid bodies are defined and
+   streaming (Data Streaming pane → NatNet enabled, note the transmission type and interface).
+2. Build a `MarkerLabeling` from Motive's streaming ids to your marker names. Log
+   `getUnfedMarkers()` — it must be empty before you go further.
+3. Wire the client's per-frame callback to `onFrameReceived` and construct
+   `NatNetMocapSource`.
+4. Record 60 s at rest into a CSV via `MocapFrameRecorder`. Then check, in order:
+   - `getFramesReceived()` ≈ 60 × the Motive rate. Materially short means packets are being
+     dropped on the wire, not by this class.
+   - `getDroppedFrameCount()` is 0. Non-zero while recording means the recorder is not
+     keeping up.
+   - `getUnlabelledMarkerCount()` is steady and small. If it is comparable to your labelled
+     marker count, the labelling ids are wrong.
+   - Every cluster shows its full marker count visible for the whole 60 s.
+5. Replay the CSV through `CsvReplayMocapSource` and confirm the frame count matches. From
+   here on, nothing needs the cameras.
+6. That 60 s of static data is also the per-axis σ measurement FRAMEWORK §20.1 asks for, and
+   every threshold downstream is expressed in terms of it. Take the per-axis standard
+   deviation of each marker's reconstructed position and check the anisotropy — the weak axis
+   will point toward the missing camera side.
+
+### `us.ihmc.alexMocap.gates` — pre-flight checks
+
+`Gate` / `GateResult` / `GateRunner`, plus **G1 `RigidityGate`**. G2, G3 and G4 are empty
+placeholders (PR2).
+
+A gate runs *before* the thing it protects and answers pass/fail — the opposite of the rule
+for primitives, which report numbers and decide nothing. G1 is the one that isolates mounting
+and labelling from every modelling question: it consumes raw mocap and nothing else, so a
+failure indicts the mount or the label and cannot be anything else. **Run it first, always.**
+
+`gates` may not import `mocap` (FRAMEWORK §19), so G1 takes pushed frames via `accumulate`
+and the CLI does the streaming. Accumulation is allocation-free and single-pass, so a 60 s
+capture at 200 Hz costs nothing to hold.
+
+### Watch out for — `gates`
+
+1. **`σ₃` … sorry, `σ` here is per-axis position noise, and it must be measured.** No
+   default anywhere: not in `RigidityGate`, not in the CLI. The wand residual is an average
+   over the whole lab and is not a substitute (FRAMEWORK §17, §20.1). Get it from the 60 s
+   static capture in the NatNet smoke test above.
+2. **The real margin is 2.1×, not 3×.** A perfectly rigid pair still shows a spread of
+   `√2·σ` — two independent noisy points, each contributing σ along the baseline — so the 3σ
+   threshold sits `3/√2 = 2.12×` above the noise floor. `getNoiseFloor()` reports the floor;
+   the report prints both. Know this before tightening the constant.
+3. **G1's sensitivity depends on the *shape* of the fault, not just its size.** A step of
+   amplitude `a` (mount slips once) has std `a/2`; a linear creep of the same total travel
+   has std `a/√12`, which is 1.7× smaller. At σ = 0.3 mm the detection threshold is about
+   **1.7 mm for a slip** and about **3.1 mm for a creep**. So a green G1 does *not* rule out
+   a slowly loosening mount below ~3 mm of travel. Both numbers are asserted in
+   `RigidityGateTest`.
+4. **And on geometry.** Only the component of a movement *along* a pair's baseline changes
+   that pair's distance. A marker shifting perpendicular to a baseline is invisible to that
+   pair however far it goes — which is why the cluster is checked pairwise rather than by one
+   aggregate number, and why non-collinear geometry is a real requirement rather than
+   pedantry.
+5. **INCOMPLETE is not PASS, and it exits 1.** A pair is measurable only in frames where both
+   its markers were visible; below `--min-samples` (default 100) it is reported
+   `NOT_EVALUATED`. With only two states, a cluster whose markers never appear together would
+   produce the most confident possible green, because nothing contradicted it.
+6. **Clusters are inferred from marker names** by the prefix before the last underscore, so
+   `PELVIS_1, PELVIS_2, …` become the `PELVIS` cluster. That is a convention, not a fact —
+   pass `--cluster <name>=<m1,m2,…>` when the naming doesn't match the mounting. Inference
+   throws rather than guessing if a name has no underscore or a group has fewer than three
+   markers.
+7. **G1 cannot catch a marker assigned to the wrong link** — only swaps *within* a cluster,
+   which change inter-marker distances. FRAMEWORK §21.5.
+
+### `us.ihmc.alexMocap.registration` — the primitive
+
+The registration primitive of FRAMEWORK.md §2, consumed by F5, F6, G1 and G4. Two classes:
+
+- `RigidBodyRegistration` — Umeyama closed-form pose from point correspondences. Stateful,
+  **not thread safe** (owns preallocated EJML scratch), allocation-free in steady state.
+  One instance per caller.
+- `RegistrationResult` — pose plus the conditioning numbers (`σ₁ ≥ σ₂ ≥ σ₃`, correspondence
+  count, reflection-corrected flag). Reports numbers, decides nothing.
+
+Occlusion needs no special handling: an unseen marker is a correspondence you never add.
+
+### Watch out for — `registration`
+
+1. **`σ₃` is comparable across marker *counts*, not across marker *geometries*.** `H` is
+   normalised by `L`, so occluding a marker no longer drops `σ₃` just because the sum got
+   shorter. It does still move `σ₃`, because losing a marker genuinely changes the cluster's
+   shape — and no normalisation can or should hide that. So `σ₃` is a fair conditioning
+   number frame to frame, but a drop in it does **not** by itself mean "a marker occluded".
+   Log the visible count alongside it (FRAMEWORK §9) and read the two together.
+2. **`σ` has units of length², not length.** They are mean-squared spreads. A cluster with
+   120 mm spread reports `σ ≈ 0.003`, not `0.12`. Pick refusal thresholds accordingly — this
+   is the easiest way to set one off by three orders of magnitude.
+3. **`compute` returning `true` is not a quality claim.** Three collinear markers give a
+   perfectly well-formed rotation and `σ₂ = σ₃ = 0`. Nothing in the transform betrays it.
+   Check `σ₃` — that is the whole of FRAMEWORK §18.1.
+4. **Don't test `σ₃ == 0`.** With real noise a collinear cluster reports `σ₃` strictly
+   positive but ~4 orders below `σ₁`. Compare the *ratio*, or compare against your measured
+   per-axis noise.
+5. **`wasReflectionCorrected()` firing is normal, not a fault.** On a near-planar cluster
+   the sign of the raw `U Vᵀ` is a coin flip; it fires on ~50% of frames. It is a diagnostic
+   for *how planar your cluster is*, not an error flag.
+6. **One instance per caller, and it is not thread safe.** It owns preallocated EJML scratch.
+   Sharing one across two solvers or two threads silently corrupts both.
+7. **Allocation-free only once capacity is reached.** `addCorrespondence` grows by doubling,
+   which allocates. Size the constructor to your worst case — markers per cluster for F6,
+   `links × markers × captures` for F5.
+8. **No frame checking.** `addCorrespondence` takes bare `Point3DReadOnly` and will happily
+   accept a source point in the wrong frame. Frame safety is F8's job (FRAMEWORK §11), and
+   it lives above this class, not in it.
+
+```java
+RigidBodyRegistration registration = new RigidBodyRegistration(markerCount);
+RegistrationResult result = new RegistrationResult();
+
+registration.clear();
+for (int j = 0; j < markerCount; j++)
+   if (visible[j])
+      registration.addCorrespondence(layoutInLinkFrame[j], measuredInWorld[j]);
+
+if (registration.compute(result))
+   ... // result.getTransform() is ^W T̂_i; result.getSigma3() says whether to believe it
+```
 
 ## Dependencies
 
 Declared in `gradle/libs.versions.toml`, consumed in `build.gradle.kts`:
 
-| Module | Version |
-|---|---|
-| `us.ihmc:euclid` | 0.22.5 |
-| `us.ihmc:euclid-frame` | 0.22.5 |
-| `us.ihmc:euclid-geometry` | 0.22.5 |
-| `us.ihmc:mecano` | 17-0.19.2 |
+| Module | Version | Scope |
+|---|---|---|
+| `us.ihmc:euclid` | 0.22.5 | `api` |
+| `us.ihmc:euclid-frame` | 0.22.5 | `api` |
+| `us.ihmc:euclid-geometry` | 0.22.5 | `api` |
+| `us.ihmc:mecano` | 17-0.19.2 | `api` |
+| `org.ejml:ejml-core` | 0.39 | `implementation` |
+| `org.ejml:ejml-ddense` | 0.39 | `implementation` |
+| `org.junit.jupiter:junit-jupiter` | 5.10.2 | `testImplementation` |
 
-They are `api` rather than `implementation` because euclid and mecano types
-(`RigidBodyTransform`, `ReferenceFrame`, `RigidBodyBasics`) show up in this package's
-own public signatures.
+The `application` plugin provides `./gradlew run` and `./gradlew installDist`. `run` sets
+`isIgnoreExitValue = true` so a gate failure surfaces as the gate's own table and exit code
+rather than a Gradle stack trace on top of it; `installDist`'s launcher propagates the real
+code (verified: 0 / 1 / 2).
+
+Euclid and mecano are `api` because their types (`RigidBodyTransform`, `ReferenceFrame`,
+`RigidBodyBasics`) show up in this package's own public signatures.
+
+EJML is `implementation` on purpose. No EJML type appears in a public signature —
+`RegistrationResult` reports doubles and a `RigidBodyTransform` — and keeping it off the
+api surface is what stops a caller reaching past `RigidBodyRegistration` and writing a
+second SVD. FRAMEWORK.md §2: *"There must be exactly one implementation."*
+
+`0.39` is not a new version in the graph: euclid already pulls `ejml-core:0.39` and mecano
+pulls `ejml-ddense:0.39`. It is declared explicitly so that `registration` does not depend
+on mecano in order to get an SVD.
 
 ## Gotchas
 
@@ -116,7 +417,85 @@ ordering is `17-0.19.1` < `17-0.19.2`; do not read it as semver.
 
 ## Tests
 
-No test dependency is declared yet — `src/test` does not exist, so `./gradlew build`
-reports `test NO-SOURCE`. The test plan in `README.md` (exact recovery, reflection guard,
-SVD rank deficiency, no-garbage-allocation) will need JUnit 5 added to the catalog before
-any of it can be written.
+JUnit 5 (`5.10.2`), run on the JUnit Platform.
+
+```bash
+./gradlew test                                   # all of it, ~1 s
+./gradlew test --tests '*testReflectionGuard*'   # one test
+./gradlew test --rerun-tasks                     # ignore the build cache
+```
+
+Reports land in `build/reports/tests/test/index.html`; machine-readable results in
+`build/test-results/test/*.xml`. `testLogging` is configured to dump full stack traces on
+failure, so a CI log is enough to diagnose without fetching the report.
+
+Currently 75 tests, no external resources, no display, no hardware:
+
+| Class | Covers |
+|---|---|
+| `registration.RigidBodyRegistrationTest` | exact recovery, reflection guard, rank deficiency, singular-value ordering, count normalisation, `σ/√N` noise scaling, below-minimum NaN, allocation-free, capacity growth |
+| `core.CoreDataTypesTest` | dense marker sets, cross-marker-set rejection, NaN-when-unset, visible counts, capture skew, joint-order checking, `K_ij` bookkeeping, no-velocity-by-reflection, allocation-free frame loop |
+| `core.CalibrationResultIOTest` | exact JSON round trip incl. byte-identical rewrite, `Δ` over 1000 random transforms, NaN survival, unknown-marker rejection, format version, parse errors |
+| `mocap.CsvRoundTripTest` | exact CSV round trip incl. visibility over 200 frames at 20% occlusion, self-describing header, marker-set and ordering mismatch, corrupt lines, untimestamped frames, comments |
+| `mocap.MocapSourceTest` | sparse Motive ids, labelling bijection, unfed markers, no stale positions between live frames, dropped-frame accounting, concurrent producer/consumer, allocation-free live handoff |
+| `gates.RigidityGateTest` | rigid cluster passes, 2 mm slip fails and names the marker, slip-vs-creep sensitivity, perpendicular-baseline blindness, label swap, rigid-body motion, unevaluated≠pass, threshold algebra, allocation-free |
+| `CalibrationRunnerTest` | the CLI end to end over real files: exit 0/1/2, incomplete exits non-zero, sigma required, cluster inference and override, usage errors |
+| `PackageDependencyTest` | the FRAMEWORK.md §19 dependency table, by scanning compiled class files |
+
+### Reading the tests
+
+Two conventions carried from `PR_PLAN.md`, worth knowing before you change one:
+
+- **Fixed seeds, loose thresholds.** Every randomised test seeds its `Random` explicitly and
+  asserts a threshold several times the theoretical value, with that value stated in a
+  comment. A test that flakes gets disabled and a disabled test is worse than none.
+- **The guards are load-bearing, and were checked by breaking them.** Every one of these was
+  mutated and the intended test confirmed to fail:
+
+  | Mutation | Caught by |
+  |---|---|
+  | determinant repair removed (Arun, not Umeyama) | `NotARotationMatrixException` |
+  | `sortDescending()` skipped | `σ₁` returns as the *smallest* singular value |
+  | `1/L` dropped from `H` | count normalisation: 25.0% shift |
+  | `double[4]` allocated in `compute` | 480,000 bytes |
+  | `MocapFrame` trusts the index instead of verifying identity | cross-marker-set test |
+  | invisible marker keeps its last position | NaN test |
+  | NaN written as `0.0` instead of `null` | never-observed and world-tilt tests |
+  | `Δ` written as the full 4×4 | `Δ` round trip |
+  | allocation escaping from `MocapFrame.clear()` | 320,000 bytes |
+  | live source skips `staging.clear()` (stale positions persist) | no-carry-over test |
+  | CSV reader ignores header/marker-set mismatch | mismatch test |
+  | partially-NaN triple treated as occluded | corrupt-line test |
+  | dropped frames not counted | drop-count and concurrency tests |
+  | recorder accepts untimestamped frames | untimestamped test |
+  | NOT_EVALUATED counted as a pass | unevaluated-pair test |
+  | incomplete gate exits zero | CLI incomplete test |
+  | naive sum-of-squares variance instead of Welford | three G1 tests |
+  | occluded pairs silently skipped | unevaluated-pair test |
+  | CLI gives sigma a silent default | sigma-required test |
+  | `registration → core` import added | both dependency tests |
+
+  EJML really does return singular values unordered — the sort is not a theoretical concern.
+  If you loosen a threshold, re-run the matching mutation.
+
+### The allocation tests
+
+`AllocationMeasurement.assertAllocationFree` measures with `com.sun.management.ThreadMXBean`
+`getThreadAllocatedBytes`, runs the batch five times after warmup, and asserts the
+**minimum** is zero. Not the mean, and not a single window: the JIT recompiles on its own
+schedule and charges that bookkeeping to the running thread, so single-window readings of
+allocation-free code look like `2792, 0, 104, 0, 0`. The minimum is exact rather than
+approximate — if the batch allocated one byte per iteration, no window could read zero.
+
+It validates its own meter first, so a zero is never vacuous. No JVM flags are needed:
+HotSpot's counter includes the in-progress TLAB.
+
+**What it proves.** What the JVM actually allocates — which is the quantity that matters,
+since a scalar-replaced allocation costs the collector nothing. It is *not* a proof that the
+source contains no `new`: injecting `new double[2]` into `MocapFrame.clear()` is invisible
+here because escape analysis removes it, while the same array assigned to a static field
+shows up instantly. Keep hot-path methods small and don't lean on that deliberately.
+
+If the registration one fails after a dependency bump, suspect EJML: the zero depends on
+`SvdImplicitQrDecompose_DDRM` reusing its internals across same-size `decompose` calls, and
+on `getU`/`getV` reshaping rather than reallocating a preallocated 3×3.

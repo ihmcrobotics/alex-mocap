@@ -7,9 +7,17 @@
 mecano = "17-0.19.2"
 # mecano 17-0.19.2 pulls euclid 0.22.3 transitively; pinned up to the latest 0.22.x patch.
 euclid = "0.22.5"
+# The version euclid and mecano both already resolve to. Declared explicitly because
+# `registration` uses the SVD directly and must not depend on mecano to get it.
+ejml = "0.39"
+junit = "5.10.2"
 
 [libraries]
 euclid = { module = "us.ihmc:euclid", version.ref = "euclid" }
 euclid-frame = { module = "us.ihmc:euclid-frame", version.ref = "euclid" }
 euclid-geometry = { module = "us.ihmc:euclid-geometry", version.ref = "euclid" }
 mecano = { module = "us.ihmc:mecano", version.ref = "mecano" }
+ejml-core = { module = "org.ejml:ejml-core", version.ref = "ejml" }
+ejml-ddense = { module = "org.ejml:ejml-ddense", version.ref = "ejml" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version = "1.10.2" }

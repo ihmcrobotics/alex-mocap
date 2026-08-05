@@ -50,30 +50,68 @@ rm -rf ~/.cache/nvim/jdtls/alex-mocap/workspace
 
 ## Entry points
 
-There are none yet. As of this writing all 53 files under `src/main/java` are empty
-placeholders (see `git log`: "add all files as empty for now"), so `./gradlew build`
-succeeds but produces an effectively empty jar. The two intended entry points are:
+Still none. Everything under `src/main/java` except the `registration` package is an empty
+placeholder (see `git log`: "add all files as empty for now"). The two intended entry
+points are:
 
-- `us.ihmc.alexMocap.CalibrationRunner`
-- `us.ihmc.alexMocap.ReplayRunner`
+- `us.ihmc.alexMocap.CalibrationRunner` — PR1 definition of done is
+  `--gate g1 --input <csv>` printing a per-cluster pass/fail table, exit non-zero on fail
+- `us.ihmc.alexMocap.ReplayRunner` — PR3
 
 Once either has a `main`, add an `application` plugin block or a `JavaExec` task and
 document the invocation here.
+
+## What is implemented
+
+`us.ihmc.alexMocap.registration` — the registration primitive of FRAMEWORK.md §2, consumed
+by F5, F6, G1 and G4. Two classes:
+
+- `RigidBodyRegistration` — Umeyama closed-form pose from point correspondences. Stateful,
+  **not thread safe** (owns preallocated EJML scratch), allocation-free in steady state.
+  One instance per caller.
+- `RegistrationResult` — pose plus the conditioning numbers (`σ₁ ≥ σ₂ ≥ σ₃`, correspondence
+  count, reflection-corrected flag). Reports numbers, decides nothing.
+
+Occlusion needs no special handling: an unseen marker is a correspondence you never add.
+
+```java
+RigidBodyRegistration registration = new RigidBodyRegistration(markerCount);
+RegistrationResult result = new RegistrationResult();
+
+registration.clear();
+for (int j = 0; j < markerCount; j++)
+   if (visible[j])
+      registration.addCorrespondence(layoutInLinkFrame[j], measuredInWorld[j]);
+
+if (registration.compute(result))
+   ... // result.getTransform() is ^W T̂_i; result.getSigma3() says whether to believe it
+```
 
 ## Dependencies
 
 Declared in `gradle/libs.versions.toml`, consumed in `build.gradle.kts`:
 
-| Module | Version |
-|---|---|
-| `us.ihmc:euclid` | 0.22.5 |
-| `us.ihmc:euclid-frame` | 0.22.5 |
-| `us.ihmc:euclid-geometry` | 0.22.5 |
-| `us.ihmc:mecano` | 17-0.19.2 |
+| Module | Version | Scope |
+|---|---|---|
+| `us.ihmc:euclid` | 0.22.5 | `api` |
+| `us.ihmc:euclid-frame` | 0.22.5 | `api` |
+| `us.ihmc:euclid-geometry` | 0.22.5 | `api` |
+| `us.ihmc:mecano` | 17-0.19.2 | `api` |
+| `org.ejml:ejml-core` | 0.39 | `implementation` |
+| `org.ejml:ejml-ddense` | 0.39 | `implementation` |
+| `org.junit.jupiter:junit-jupiter` | 5.10.2 | `testImplementation` |
 
-They are `api` rather than `implementation` because euclid and mecano types
-(`RigidBodyTransform`, `ReferenceFrame`, `RigidBodyBasics`) show up in this package's
-own public signatures.
+Euclid and mecano are `api` because their types (`RigidBodyTransform`, `ReferenceFrame`,
+`RigidBodyBasics`) show up in this package's own public signatures.
+
+EJML is `implementation` on purpose. No EJML type appears in a public signature —
+`RegistrationResult` reports doubles and a `RigidBodyTransform` — and keeping it off the
+api surface is what stops a caller reaching past `RigidBodyRegistration` and writing a
+second SVD. FRAMEWORK.md §2: *"There must be exactly one implementation."*
+
+`0.39` is not a new version in the graph: euclid already pulls `ejml-core:0.39` and mecano
+pulls `ejml-ddense:0.39`. It is declared explicitly so that `registration` does not depend
+on mecano in order to get an SVD.
 
 ## Gotchas
 
@@ -116,7 +154,49 @@ ordering is `17-0.19.1` < `17-0.19.2`; do not read it as semver.
 
 ## Tests
 
-No test dependency is declared yet — `src/test` does not exist, so `./gradlew build`
-reports `test NO-SOURCE`. The test plan in `README.md` (exact recovery, reflection guard,
-SVD rank deficiency, no-garbage-allocation) will need JUnit 5 added to the catalog before
-any of it can be written.
+JUnit 5 (`5.10.2`), run on the JUnit Platform.
+
+```bash
+./gradlew test                                   # all of it, ~1 s
+./gradlew test --tests '*testReflectionGuard*'   # one test
+./gradlew test --rerun-tasks                     # ignore the build cache
+```
+
+Reports land in `build/reports/tests/test/index.html`; machine-readable results in
+`build/test-results/test/*.xml`. `testLogging` is configured to dump full stack traces on
+failure, so a CI log is enough to diagnose without fetching the report.
+
+Currently 11 tests, no external resources, no display:
+
+| Class | Covers |
+|---|---|
+| `registration.RigidBodyRegistrationTest` | exact recovery, reflection guard, rank deficiency, singular-value ordering, count normalisation, `σ/√N` noise scaling, below-minimum NaN, allocation-free, capacity growth |
+| `PackageDependencyTest` | the FRAMEWORK.md §19 dependency table, by scanning compiled class files |
+
+### Reading the tests
+
+Two conventions carried from `PR_PLAN.md`, worth knowing before you change one:
+
+- **Fixed seeds, loose thresholds.** Every randomised test seeds its `Random` explicitly and
+  asserts a threshold several times the theoretical value, with that value stated in a
+  comment. A test that flakes gets disabled and a disabled test is worse than none.
+- **The thresholds are load-bearing.** Each of the guards in `RigidBodyRegistration` was
+  mutation-checked: remove the determinant repair and the reflection test throws
+  `NotARotationMatrixException`; remove `sortDescending()` and `σ₁` comes back as the
+  *smallest* singular value (EJML genuinely returns them unordered — this is not a
+  theoretical concern); drop the `1/L` on `H` and the count-normalisation test reports a
+  25% shift; allocate one `double[4]` inside `compute` and the allocation test reports
+  480,000 bytes. If you loosen a threshold, re-run that check.
+
+### The allocation test
+
+`testRegistrationIsAllocationFree` measures with `com.sun.management.ThreadMXBean`
+`getThreadAllocatedBytes` and asserts exactly zero over 10,000 registrations after a 20,000
+iteration warmup. It validates its own meter first — a loop known to allocate 1024
+`Point3D`s must read as allocating — so a zero from the real loop is not vacuous. No JVM
+flags are needed: HotSpot's counter includes the in-progress TLAB, so TLAB batching does
+not hide allocation.
+
+If this fails after a dependency bump, suspect EJML: the zero depends on
+`SvdImplicitQrDecompose_DDRM` reusing its internals across same-size `decompose` calls, and
+on `getU`/`getV` reshaping rather than reallocating a preallocated 3×3.

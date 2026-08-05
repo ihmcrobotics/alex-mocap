@@ -26,4 +26,26 @@ dependencies {
     api(libs.euclid.frame)
     api(libs.euclid.geometry)
     api(libs.mecano)
+
+    // implementation, not api: EJML is an internal detail of `registration`. No EJML type
+    // appears in a public signature -- RegistrationResult reports doubles and a
+    // RigidBodyTransform -- and keeping it off the api surface is what stops callers from
+    // reaching past RigidBodyRegistration and writing a second SVD (FRAMEWORK.md §2:
+    // "There must be exactly one implementation").
+    implementation(libs.ejml.core)
+    implementation(libs.ejml.ddense)
+
+    testImplementation(libs.junit.jupiter)
+    testRuntimeOnly(libs.junit.platform.launcher)
+    // Tests reach into EJML directly to build matrices with planted singular values.
+    testImplementation(libs.ejml.ddense)
+}
+
+tasks.test {
+    useJUnitPlatform()
+
+    testLogging {
+        events("failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
 }

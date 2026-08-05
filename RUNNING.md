@@ -50,17 +50,49 @@ rm -rf ~/.cache/nvim/jdtls/alex-mocap/workspace
 
 ## Entry points
 
-Still none. Everything under `src/main/java` except the `registration` package is an empty
-placeholder (see `git log`: "add all files as empty for now"). The two intended entry
-points are:
+`us.ihmc.alexMocap.CalibrationRunner` runs a pre-flight gate over a captured mocap log.
 
-- `us.ihmc.alexMocap.CalibrationRunner` — PR1 definition of done is
-  `--gate g1 --input <csv>` printing a per-cluster pass/fail table, exit non-zero on fail.
-  The CSV it eats is what `MocapFrameRecorder` writes; `gates` is the remaining piece.
-- `us.ihmc.alexMocap.ReplayRunner` — PR3
+```bash
+./gradlew installDist
+./build/install/alex-mocap/bin/alex-mocap --gate g1 --input capture.csv --sigma 0.0003
 
-Once either has a `main`, add an `application` plugin block or a `JavaExec` task and
-document the invocation here.
+# or without installing:
+./gradlew run --args="--gate g1 --input capture.csv --sigma 0.0003"
+```
+
+`--sigma` is the **measured** per-axis mocap noise in metres, and there is deliberately no
+default — see the caveats below. `--help` prints the full option list.
+
+Exit codes: `0` every gate passed, `1` a gate failed **or could not be fully evaluated**,
+`2` usage or I/O error.
+
+Sample output on a capture where a pelvis marker's mount slipped 2 mm partway through:
+
+```
+input    capture.csv
+markers  8
+clusters PELVIS(4), L_THIGH(4)
+sigma    0.3000 mm per axis (measured)
+
+G1 -- rigidity: inter-marker distances within a cluster must be constant to within mocap noise
+  12 pairs over 600 frames, sigma 0.3000 mm, threshold 0.9000 mm (3.0 sigma; noise floor 0.4243 mm = sqrt(2) sigma)
+
+  STATUS         SUBJECT                                      MEASURED    THRESHOLD  SAMPLES
+  FAIL           PELVIS: PELVIS_1-PELVIS_2                   0.9924 mm    0.9000 mm      600
+                 std 0.9924 mm over a 120.8 mm baseline (floor 0.4243 mm)
+  FAIL           PELVIS: PELVIS_1-PELVIS_3                   1.0174 mm    0.9000 mm      600
+                 std 1.0174 mm over a 121.0 mm baseline (floor 0.4243 mm)
+
+  10 passed, 2 failed, 0 not evaluated
+
+  G1: FAIL
+```
+
+Passing checks are summarised by count rather than listed: forty green rows is how a red one
+gets missed.
+
+`us.ihmc.alexMocap.ReplayRunner` (PR3) is still an empty placeholder, as is everything under
+`model`, `frames`, `calibration`, `runtime`, `postprocess`, `scs2`, and the G2/G3/G4 gates.
 
 ## What is implemented
 
@@ -212,6 +244,53 @@ tests the mock.
    deviation of each marker's reconstructed position and check the anisotropy — the weak axis
    will point toward the missing camera side.
 
+### `us.ihmc.alexMocap.gates` — pre-flight checks
+
+`Gate` / `GateResult` / `GateRunner`, plus **G1 `RigidityGate`**. G2, G3 and G4 are empty
+placeholders (PR2).
+
+A gate runs *before* the thing it protects and answers pass/fail — the opposite of the rule
+for primitives, which report numbers and decide nothing. G1 is the one that isolates mounting
+and labelling from every modelling question: it consumes raw mocap and nothing else, so a
+failure indicts the mount or the label and cannot be anything else. **Run it first, always.**
+
+`gates` may not import `mocap` (FRAMEWORK §19), so G1 takes pushed frames via `accumulate`
+and the CLI does the streaming. Accumulation is allocation-free and single-pass, so a 60 s
+capture at 200 Hz costs nothing to hold.
+
+### Watch out for — `gates`
+
+1. **`σ₃` … sorry, `σ` here is per-axis position noise, and it must be measured.** No
+   default anywhere: not in `RigidityGate`, not in the CLI. The wand residual is an average
+   over the whole lab and is not a substitute (FRAMEWORK §17, §20.1). Get it from the 60 s
+   static capture in the NatNet smoke test above.
+2. **The real margin is 2.1×, not 3×.** A perfectly rigid pair still shows a spread of
+   `√2·σ` — two independent noisy points, each contributing σ along the baseline — so the 3σ
+   threshold sits `3/√2 = 2.12×` above the noise floor. `getNoiseFloor()` reports the floor;
+   the report prints both. Know this before tightening the constant.
+3. **G1's sensitivity depends on the *shape* of the fault, not just its size.** A step of
+   amplitude `a` (mount slips once) has std `a/2`; a linear creep of the same total travel
+   has std `a/√12`, which is 1.7× smaller. At σ = 0.3 mm the detection threshold is about
+   **1.7 mm for a slip** and about **3.1 mm for a creep**. So a green G1 does *not* rule out
+   a slowly loosening mount below ~3 mm of travel. Both numbers are asserted in
+   `RigidityGateTest`.
+4. **And on geometry.** Only the component of a movement *along* a pair's baseline changes
+   that pair's distance. A marker shifting perpendicular to a baseline is invisible to that
+   pair however far it goes — which is why the cluster is checked pairwise rather than by one
+   aggregate number, and why non-collinear geometry is a real requirement rather than
+   pedantry.
+5. **INCOMPLETE is not PASS, and it exits 1.** A pair is measurable only in frames where both
+   its markers were visible; below `--min-samples` (default 100) it is reported
+   `NOT_EVALUATED`. With only two states, a cluster whose markers never appear together would
+   produce the most confident possible green, because nothing contradicted it.
+6. **Clusters are inferred from marker names** by the prefix before the last underscore, so
+   `PELVIS_1, PELVIS_2, …` become the `PELVIS` cluster. That is a convention, not a fact —
+   pass `--cluster <name>=<m1,m2,…>` when the naming doesn't match the mounting. Inference
+   throws rather than guessing if a name has no underscore or a group has fewer than three
+   markers.
+7. **G1 cannot catch a marker assigned to the wrong link** — only swaps *within* a cluster,
+   which change inter-marker distances. FRAMEWORK §21.5.
+
 ### `us.ihmc.alexMocap.registration` — the primitive
 
 The registration primitive of FRAMEWORK.md §2, consumed by F5, F6, G1 and G4. Two classes:
@@ -280,6 +359,11 @@ Declared in `gradle/libs.versions.toml`, consumed in `build.gradle.kts`:
 | `org.ejml:ejml-ddense` | 0.39 | `implementation` |
 | `org.junit.jupiter:junit-jupiter` | 5.10.2 | `testImplementation` |
 
+The `application` plugin provides `./gradlew run` and `./gradlew installDist`. `run` sets
+`isIgnoreExitValue = true` so a gate failure surfaces as the gate's own table and exit code
+rather than a Gradle stack trace on top of it; `installDist`'s launcher propagates the real
+code (verified: 0 / 1 / 2).
+
 Euclid and mecano are `api` because their types (`RigidBodyTransform`, `ReferenceFrame`,
 `RigidBodyBasics`) show up in this package's own public signatures.
 
@@ -345,7 +429,7 @@ Reports land in `build/reports/tests/test/index.html`; machine-readable results 
 `build/test-results/test/*.xml`. `testLogging` is configured to dump full stack traces on
 failure, so a CI log is enough to diagnose without fetching the report.
 
-Currently 56 tests, no external resources, no display, no hardware:
+Currently 75 tests, no external resources, no display, no hardware:
 
 | Class | Covers |
 |---|---|
@@ -354,6 +438,8 @@ Currently 56 tests, no external resources, no display, no hardware:
 | `core.CalibrationResultIOTest` | exact JSON round trip incl. byte-identical rewrite, `Δ` over 1000 random transforms, NaN survival, unknown-marker rejection, format version, parse errors |
 | `mocap.CsvRoundTripTest` | exact CSV round trip incl. visibility over 200 frames at 20% occlusion, self-describing header, marker-set and ordering mismatch, corrupt lines, untimestamped frames, comments |
 | `mocap.MocapSourceTest` | sparse Motive ids, labelling bijection, unfed markers, no stale positions between live frames, dropped-frame accounting, concurrent producer/consumer, allocation-free live handoff |
+| `gates.RigidityGateTest` | rigid cluster passes, 2 mm slip fails and names the marker, slip-vs-creep sensitivity, perpendicular-baseline blindness, label swap, rigid-body motion, unevaluated≠pass, threshold algebra, allocation-free |
+| `CalibrationRunnerTest` | the CLI end to end over real files: exit 0/1/2, incomplete exits non-zero, sigma required, cluster inference and override, usage errors |
 | `PackageDependencyTest` | the FRAMEWORK.md §19 dependency table, by scanning compiled class files |
 
 ### Reading the tests
@@ -382,6 +468,11 @@ Two conventions carried from `PR_PLAN.md`, worth knowing before you change one:
   | partially-NaN triple treated as occluded | corrupt-line test |
   | dropped frames not counted | drop-count and concurrency tests |
   | recorder accepts untimestamped frames | untimestamped test |
+  | NOT_EVALUATED counted as a pass | unevaluated-pair test |
+  | incomplete gate exits zero | CLI incomplete test |
+  | naive sum-of-squares variance instead of Welford | three G1 tests |
+  | occluded pairs silently skipped | unevaluated-pair test |
+  | CLI gives sigma a silent default | sigma-required test |
   | `registration → core` import added | both dependency tests |
 
   EJML really does return singular values unordered — the sort is not a theoretical concern.

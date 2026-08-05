@@ -7,6 +7,19 @@
 
 plugins {
     `java-library`
+    application
+}
+
+application {
+    mainClass = "us.ihmc.alexMocap.CalibrationRunner"
+    applicationName = "alex-mocap"
+}
+
+// CalibrationRunner returns an exit code and main() passes it to System.exit; without this,
+// `gradlew run` reports its own BUILD FAILED on top of a gate failure, which buries the gate's
+// table under a Gradle stack trace. The exit code still reaches a caller of installDist.
+tasks.named<JavaExec>("run") {
+    isIgnoreExitValue = true
 }
 
 repositories {

@@ -91,8 +91,79 @@ G1 -- rigidity: inter-marker distances within a cluster must be constant to with
 Passing checks are summarised by count rather than listed: forty green rows is how a red one
 gets missed.
 
+### `--calibrate` — run A′ (PR2)
+
+Needs three inputs: a mocap CSV, an encoder CSV, and the URDF.
+
+```bash
+./build/install/alex-mocap/bin/alex-mocap \
+    --calibrate \
+    --input    capture.csv \
+    --encoders encoders.csv \
+    --urdf     robot.urdf \
+    --sigma    0.0003 \
+    --world-tilt 0.08 \
+    --output   calibration.json
+```
+
+`--gauge <link>` defaults to the URDF root link, which is what `Δ = ^c T_b` is defined
+against. `--world-tilt` is in **degrees** and is recorded in provenance; omit it and the
+result records NaN and the run warns, which is the honest encoding of "nobody measured it".
+
+Sample output (30 synthetic captures at σ = 0.3 mm, toy 6-DOF URDF):
+
+```
+urdf     toy6dof.urdf  (sha256 2db166ba5bd031b6...)
+captures 30
+clusters pelvis(4), l_thigh(4), l_shank(4), l_foot(4), r_thigh(4), r_shank(4), r_foot(4), gauge=pelvis
+skew     worst |mocap - encoder| = 0.000 ms over 30 captures
+
+A' calibration report
+  captures            30 usable of 30 (reference capture 0)
+  observations        840
+  iterations          71 (converged)
+  J after bootstrap   3.114601e+00 m^2
+  J final             2.950952e-03 m^2
+  in-sample RMS       1.8743 mm  (NOT an accuracy claim; see G4)
+  monotone            yes
+  gauge worst sigma3  1.230385e-04 m^2
+  base step sigma3    9.891633e-03 m^2
+  per-marker in-sample residuals
+    link         marker           K_ij   rms (mm)   max (mm)
+    pelvis       pelvis_M0          30     0.4107     0.6905
+    ...
+    l_shank      l_shank_M0         30     1.6796     3.4646
+    l_foot       l_foot_M0          30     2.7932     6.7967
+
+G2 -- Bootstrap spread: ...
+  No marker's per-capture spread exceeds 3.0σ; nothing indicts the model.
+  all 28 checks passed
+  G2: PASS
+```
+
+**Read the per-marker residual column, not the summary RMS.** The gradient down it —
+0.41 mm at the pelvis, 2.79 mm at the foot, on data whose marker noise is 0.3 mm everywhere
+— is not a bug and not a bad fit. It is the gauge cluster's angular error multiplied by the
+lever arm out to each link, and it is the dominant error term in this whole pipeline. See
+*Gotchas* below.
+
+The encoder CSV mirrors the mocap one — header row is the schema, joint names travel with
+the data so a permuted column order fails at the URDF boundary instead of silently
+producing a plausible calibration at the wrong configuration:
+
+```
+# alex-mocap encoder log, format 1
+timestamp_ns,l_hip,l_knee,l_ankle,r_hip,r_knee,r_ankle
+1000000000,0.1042,0.8813,-0.2210,0.0455,1.4400,0.1188
+```
+
+Rows are paired with mocap rows **by index** — that is the only thing two independently
+written logs agree on — and the worst timestamp skew is printed. FRAMEWORK §18.3: a
+mispairing is valid mocap plus valid encoders at the wrong configuration, and nothing else
+about it looks wrong.
+
 `us.ihmc.alexMocap.ReplayRunner` (PR3) is still an empty placeholder, as is everything under
-`model`, `frames`, `calibration`, `runtime`, `postprocess`, `scs2`, and the G2/G3/G4 gates.
+`runtime`, `postprocess`, `scs2`, and the G3 gate.
 
 ## What is implemented
 
@@ -291,6 +362,113 @@ capture at 200 Hz costs nothing to hold.
 7. **G1 cannot catch a marker assigned to the wrong link** — only swaps *within* a cluster,
    which change inter-marker distances. FRAMEWORK §21.5.
 
+### `us.ihmc.alexMocap.model` — F1, the FK reference
+
+`URDFLoader` (URDF → Mecano tree, plus a SHA-256 for provenance) and `RobotModelHandle`
+(`setConfiguration`, `updateFrames`, `packLinkToBase` = `^b T_i(q)`).
+
+This answers **where the model says the link is**, from the URDF and encoders alone. The
+other object — where the link *actually* is — comes from a marker cluster through
+`RigidBodyRegistration`. FRAMEWORK §0 exists to keep those two apart; they live in separate
+types for the same reason.
+
+### Watch out for — `model`
+
+1. **SCS2 inserts a `SixDoFJoint` you did not ask for.** The instantiated tree is
+   `rootBody → [6-DoF] → pelvis → …`, where `rootBody` is synthetic and appears in no URDF.
+   The base frame `b` is the frame *after* that joint. Taking the synthetic root's frame
+   instead is the obvious reading and is wrong: every `^b T_i` would then contain the
+   floating joint, and §0's load-bearing claim that `^b T_i(q)` depends on joint angles
+   alone would stop holding — silently, since at identity it looks correct.
+   `RobotModelHandleTest` moves the base to 20 random poses and requires no `^b T_i` to move.
+2. **`getBodyFixedFrame()` is the centre-of-mass frame, not the URDF link frame.** It comes
+   out of the tree named `l_thighCoM`. FRAMEWORK §3 said to read it; that instruction has
+   been amended, and this package uses `parentJoint.getFrameAfterJoint()`. Both conventions
+   are self-consistent for the calibration itself, but §12 and §14 presuppose a non-zero
+   `^i c_i`, which is identically zero in the CoM frame — it would delete the link-CoM term
+   from the error budget.
+3. **`getLinkNames()` excludes the synthetic root**, so a `MarkerCluster` naming a link that
+   does not exist fails loudly rather than matching scaffolding.
+4. **Prefer `setConfiguration(EncoderSample)` to `setQ(double[])`** for anything from outside
+   the process. Only the former checks joint names.
+
+### `us.ihmc.alexMocap.frames` — F8 and the pelvis triad
+
+`TiltMeasurement`, `GravityAlignedWorldFrame`, `PelvisFrameTriad`, `FrameNames`.
+
+F8 is a **frame node, not a correction function** (§11). A correction applied at call sites
+can be forgotten at call sites, and forgetting it produces no error — just a CoM ~7 mm low
+at 0.5° of tilt. The tree is `Wg → W`, gravity-aligned as the parent of Motive's tilted
+world, so `changeFrame(Wg)` *is* the correction and cannot be half-applied.
+
+### Watch out for — `frames`
+
+1. **`TiltMeasurement` has no zero-argument constructor and no silent default.** The only
+   untilted instance is `assumedLevel(note)`, which demands a written justification, reports
+   `isMeasured() == false`, and prints `ASSUMED_LEVEL` everywhere. §11: measured, never
+   assumed.
+2. **It carries a direction, not just §11's scalar `θ`.** A 0.5° tilt toward +x and one
+   toward +y give the same height error and completely different horizontal CoM. The
+   correction is the *minimal* rotation carrying measured-up onto +z — a tilt constrains two
+   DOF, not three, so it must not invent heading.
+3. **Frames are instance fields, not statics.** A session constant is not a process constant;
+   a test suite covers several tilts. Pass a `nameSuffix` when constructing more than one —
+   Euclid rejects duplicate frame names under one parent.
+4. **`setBaseToImu` requires you to say whether the transform is verified.** There is no
+   overload that omits it. The `b → imu` offset is an unverified CAD number and getting it
+   wrong costs `ω × r` = 0.1 m/s at 1 rad/s and 0.1 m, which reads as an estimator
+   regression rather than as a bookkeeping error (§13).
+
+### `us.ihmc.alexMocap.calibration` — F2–F5 and the A′ loop
+
+| Type | Role |
+|---|---|
+| `CaptureSet` | the `K` captures + marker set, joint order, clusters, gauge |
+| `BaseInitializer` | F2: `Δ = I`, and gauge-cluster tracking → `^W T_c^(k)` |
+| `BootstrapSolver` | F3, the "software T-pose" — F4 over one capture |
+| `MarkerLayoutSolver` | F4, the marker step: an unweighted mean |
+| `BaseAlignmentSolver` | F5, the base step: one Procrustes over everything |
+| `AlternatingCalibrator` | A′, plus convergence |
+| `CalibrationReport` | objective trace + per-marker residuals |
+
+### Watch out for — `calibration`
+
+1. **`^W T_c^(k)` is computed once, before the loop, and never updated.** §7 says these come
+   from "F6 applied to the pelvis cluster", which invites recomputing them each iteration
+   from the freshly solved pelvis layout. Don't. A′'s monotonicity argument is that each step
+   exactly minimises *a fixed objective*; moving `^W T_c^(k)` between iterations changes `J`
+   itself, and a decreasing sequence of values of different functions means nothing.
+2. **The cluster shape is centred on the gauge markers' centroid.** This looks cosmetic and
+   is not — see *Gotchas*.
+3. **The default iteration cap is 500, not §8's 50.** A′ converges linearly. On real data the
+   tolerance stops it in a few tens of iterations; on noiseless or weakly-conditioned data
+   `J` keeps falling geometrically and 50 stops it about 1 mm short, reporting a small `J`
+   and looking converged. Always read `isConverged()`.
+4. **`Δ` is convention-dependent and not comparable across runs** that chose a different
+   reference capture. What is comparable is `^W T_c^(k) · Δ`, the base pose.
+5. **In-sample RMS is not an accuracy claim.** The report says so in the line itself.
+
+### `gates` — G2 and G4 (PR2)
+
+`BootstrapSpreadGate` (G2) and `HeldOutResidualGate` (G4). Neither imports `calibration`
+(§19); both take their inputs at construction, so G2 can run before the calibrator exists.
+
+6. **G2 takes `Δ` as an input, and that changes how a failure reads.** The back-projection is
+   not `Δ`-free: a wrong `Δ` can only make the spread *larger*, never smaller. So G2 at time
+   zero with `Δ = I` is **conservative** — it can cry wolf, it cannot miss a real systematic
+   error. For the diagnosis of *which* assumption is wrong, pass the solved `Δ`. The CLI does.
+7. **G2's expected spread is per marker, not per session**, because it must include the
+   gauge-cluster term scaled by that marker's lever arm. A gate built on `σ√3` alone fires on
+   clean data.
+8. **G2 is blind to an offset on a terminal joint.** It is absorbed wholesale into the last
+   link's layout, and is genuinely unidentifiable from marker data. Sensitivity grows with
+   depth below the offending joint; the link immediately below it barely moves.
+9. **G2 cannot separate "joint offset" from "elasticity" by correlation.** Elastic deflection
+   enters through gravitational torque, which is itself a function of joint angle, so both
+   correlate strongly. The reliable discriminator is spatial: an offset raises spread on one
+   branch, elasticity on every loaded branch at once.
+10. **G4 does not show the asymmetry PR_PLAN describes.** See *Gotchas*.
+
 ### `us.ihmc.alexMocap.registration` — the primitive
 
 The registration primitive of FRAMEWORK.md §2, consumed by F5, F6, G1 and G4. Two classes:
@@ -355,6 +533,7 @@ Declared in `gradle/libs.versions.toml`, consumed in `build.gradle.kts`:
 | `us.ihmc:euclid-frame` | 0.22.5 | `api` |
 | `us.ihmc:euclid-geometry` | 0.22.5 | `api` |
 | `us.ihmc:mecano` | 17-0.19.2 | `api` |
+| `us.ihmc:scs2-definition` | 17-0.30.0 | `implementation` |
 | `org.ejml:ejml-core` | 0.39 | `implementation` |
 | `org.ejml:ejml-ddense` | 0.39 | `implementation` |
 | `org.junit.jupiter:junit-jupiter` | 5.10.2 | `testImplementation` |
@@ -375,6 +554,23 @@ second SVD. FRAMEWORK.md §2: *"There must be exactly one implementation."*
 `0.39` is not a new version in the graph: euclid already pulls `ejml-core:0.39` and mecano
 pulls `ejml-ddense:0.39`. It is declared explicitly so that `registration` does not depend
 on mecano in order to get an SVD.
+
+**`scs2-definition` is the headless half of SCS2** — `URDFTools`, `RobotDefinition`, and
+`RobotDefinition.newInstance()` handing back a Mecano tree. It pulls **no JavaFX**, and its
+POM pins euclid 0.22.5 and mecano 17-0.19.2, exactly the versions already declared, so
+adding it upgrades nothing. `scs2-session-visualizer-jfx` is a separate artifact and is
+deliberately not declared until PR3.
+
+It is `implementation`, not `api`, for the same reason as EJML: `URDFLoader` takes a `Path`
+and returns a Mecano `RigidBodyBasics`, so no SCS2 type reaches any signature anywhere in
+the project.
+
+FRAMEWORK §19 used to say "nothing outside `scs2` imports `scs2`", and **nothing enforced
+it** — `PackageDependencyTest` only scanned `us/ihmc/alexMocap/` names, so it was blind to
+`import us.ihmc.scs2.*` and any package could have taken the dependency without a test
+moving. It now scans `us/ihmc/scs2/` too: only `model` may use `scs2-definition`, and only
+the `scs2` package may use SCS2 beyond it. The rule in §19 was narrowed to match, since its
+stated motive was headless-testability and `scs2-definition` is headless.
 
 ## Gotchas
 
@@ -415,6 +611,81 @@ command above if you bump either version.
 **The `17-` prefix in mecano's version is the Java flavor, not a major version.** Version
 ordering is `17-0.19.1` < `17-0.19.2`; do not read it as semver.
 
+### Layout accuracy is not `σ/√K`. It is set by the gauge cluster.
+
+This is the single most useful thing PR2 turned up, and it changes what hardware work is
+worth doing.
+
+PR_PLAN derived its 0.2 mm target from F4's averaging: "theoretical is `σ/√K ≈ 0.055 mm`".
+That term is real and correct, and it is **not** the dominant one, so no implementation can
+hit a threshold derived from it.
+
+Every capture's base pose comes from registering four pelvis markers, so it carries an
+angular error of order `σ / (√N · r_perp)` — which is exactly the scaling FRAMEWORK §1
+states in the sentence asking for an outrigger bracket. That angle is then multiplied by the
+lever arm out to each link. Measured, at σ = 0.3 mm, RMS layout error over all markers,
+three seeds:
+
+| K | all markers noisy | gauge cluster noiseless |
+|---|---|---|
+| 30 | 0.383 mm | 0.0885 mm |
+| 480 | 0.188 mm | 0.0226 mm |
+| ratio | **2.04×** | **3.92× (= √16)** |
+
+Take the noise off the four pelvis markers and everything downstream behaves exactly as §6
+predicts — 0.0885 mm at K=30 against a 0.055 mm floor, improving as a clean `1/√K`. Put it
+back and the error is 4.3× worse *and* the exponent breaks, because two things are going on:
+
+1. **Per-capture gauge noise** does average as `1/√K`, but it enters amplified by the lever
+   arm, which is why the per-marker residual table climbs from pelvis to foot.
+2. **Reference-shape noise does not average at all.** `BaseInitializer` defines the cluster's
+   shape from one capture's marker positions, so that capture's noise is baked into the
+   frame definition for the whole session. This is what bends the exponent to about 0.25.
+
+Practical consequences, in order of leverage:
+
+- **Widen the pelvis cluster.** Error scales as `1/r_perp`, verified: 0.06 m → 3.00 mm,
+  0.10 → 1.80, 0.14 → 1.29, 0.20 → 0.91. §1's outrigger bracket is the cheapest accuracy
+  you can buy in this project.
+- **Lower σ** (the §20 camera work). Linear.
+- **More captures is the weakest lever** — 16× the captures bought 2×.
+- **Item 2 above is removable and is not done.** Run A′, rebuild the gauge shape from the
+  converged pelvis layout (averaged over all K, so `√K` quieter than any single capture),
+  then run A′ again with that new fixed `^W T_c^(k)`. Monotonicity survives because each run
+  minimises its own fixed objective. It is left out because it turns A′ into a two-stage
+  method, which is a specification decision rather than an implementation one.
+
+### Two things PR_PLAN expects that the algebra does not give
+
+**G2 does not correlate with "that specific joint's excursion".** Writing the chain as
+`T = J_1 … J_j(q_j) … J_n` and injecting `q_j → q_j + δ`:
+
+```
+(T_model)⁻¹ T_true  =  [J_{j+1} … J_n]⁻¹ · R(δ) · [J_{j+1} … J_n]
+```
+
+Everything above `j` cancels, and so does `J_j`'s own fixed offset. So the back-projection
+error depends on the joints **strictly below** `j`, not on `q_j`. Three consequences: markers
+above the fault show nothing; the link immediately below shows nothing either (empty
+bracket, constant error, absorbed into the layout); and sensitivity accumulates with depth.
+G2 therefore localises to *the branch and the depth*, which is more information than a joint
+name — but **an offset on a terminal joint is invisible**, and correctly so, since it is
+unidentifiable from marker data.
+
+Related: correlate the deviation **magnitude** against a joint angle and you find nothing.
+The signed displacement is roughly linear in the joint angle, so its magnitude is V-shaped
+and its Pearson correlation is ~0 however strong the dependence. Measured on a 0.5° `l_hip`
+injection, magnitudes reported "indicts nothing" on markers failing the spread test by 3.2σ.
+G2 correlates signed components.
+
+**G4 does not show "held-out blows up while in-sample stays low".** Measured on that same
+injection, in-sample and held-out RMS are within 3% — both raised together, sixfold. An
+i.i.d. split samples the same configuration distribution in both halves, so a systematic
+bias is present equally in each. Held-out validation detects **overfitting**, and this fit
+has 90 parameters against 1680 observations. The absolute level is the signal here, not the
+ratio. Getting the literal asymmetry would need the held-out split to cover configurations
+the training split did not — a better G4 design, and not implemented.
+
 ## Tests
 
 JUnit 5 (`5.10.2`), run on the JUnit Platform.
@@ -429,7 +700,7 @@ Reports land in `build/reports/tests/test/index.html`; machine-readable results 
 `build/test-results/test/*.xml`. `testLogging` is configured to dump full stack traces on
 failure, so a CI log is enough to diagnose without fetching the report.
 
-Currently 75 tests, no external resources, no display, no hardware:
+Currently 118 tests, no external resources, no display, no hardware:
 
 | Class | Covers |
 |---|---|
@@ -440,7 +711,12 @@ Currently 75 tests, no external resources, no display, no hardware:
 | `mocap.MocapSourceTest` | sparse Motive ids, labelling bijection, unfed markers, no stale positions between live frames, dropped-frame accounting, concurrent producer/consumer, allocation-free live handoff |
 | `gates.RigidityGateTest` | rigid cluster passes, 2 mm slip fails and names the marker, slip-vs-creep sensitivity, perpendicular-baseline blindness, label swap, rigid-body motion, unevaluated≠pass, threshold algebra, allocation-free |
 | `CalibrationRunnerTest` | the CLI end to end over real files: exit 0/1/2, incomplete exits non-zero, sigma required, cluster inference and override, usage errors |
-| `PackageDependencyTest` | the FRAMEWORK.md §19 dependency table, by scanning compiled class files |
+| `model.RobotModelHandleTest` | URDF load, joint order, **`^b T_i` invariance under 20 random base poses**, link frame vs CoM frame, FK against hand-computed URDF arithmetic, permuted joint order rejected, parse errors carry a reason |
+| `frames.FramesTest` | §11's 7 mm at 0.5°, correction carries up onto +z without inventing heading, `changeFrame` applies it, assumed-level must justify itself, 90° tilt rejected, pelvis triad composes in one order, `ω × r` = 0.1 m/s |
+| `calibration.PlantAndRecoverTest` | noiseless K=5 exact to 4.6e-15 m, realistic and today's-lab noise, **J monotone across every half-step over 4 seeds**, convergence and determinism, 20% occlusion with `K_ij` bookkeeping, never-seen marker stays NaN, frozen legs leave the base step ill-conditioned, the gauge-cluster scaling law and error decomposition |
+| `gates.GateInjectionTest` | G2 passes clean, fires on a 0.5° offset and localises to the affected branch, is blind to a terminal-joint offset, fires on elastic deflection across both branches; G4 clean vs injected |
+| `CalibrateCliTest` | `--calibrate` end to end over two CSVs and a URDF, provenance round trip, unmeasured tilt warned about, gauge defaults to the base link, permuted joint order rejected, encoder CSV bit-exact round trip |
+| `PackageDependencyTest` | the FRAMEWORK.md §19 dependency table, by scanning compiled class files; plus SCS2 containment against the external library |
 
 ### Reading the tests
 

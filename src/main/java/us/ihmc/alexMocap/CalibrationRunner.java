@@ -9,22 +9,39 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import us.ihmc.alexMocap.calibration.AlternatingCalibrator;
+import us.ihmc.alexMocap.calibration.BaseInitializer;
+import us.ihmc.alexMocap.calibration.CalibrationReport;
+import us.ihmc.alexMocap.calibration.CaptureSet;
+import us.ihmc.alexMocap.core.CalibrationResult;
+import us.ihmc.alexMocap.core.CalibrationResultIO;
+import us.ihmc.alexMocap.core.Capture;
+import us.ihmc.alexMocap.core.CsvEncoderLog;
+import us.ihmc.alexMocap.core.EncoderSample;
 import us.ihmc.alexMocap.core.MarkerCluster;
 import us.ihmc.alexMocap.core.MarkerId;
 import us.ihmc.alexMocap.core.MocapFrame;
+import us.ihmc.alexMocap.gates.BootstrapSpreadGate;
 import us.ihmc.alexMocap.gates.GateRunner;
 import us.ihmc.alexMocap.gates.RigidityGate;
 import us.ihmc.alexMocap.mocap.CsvReplayMocapSource;
+import us.ihmc.alexMocap.model.RobotModelHandle;
+import us.ihmc.alexMocap.model.URDFLoader;
+import us.ihmc.euclid.transform.interfaces.RigidBodyTransformReadOnly;
 
 /**
  * Command-line entry point for the offline calibration tooling.
  * <p>
- * As of PR1 it runs G1 over a captured CSV. The calibration itself ({@code --calibrate}) arrives
- * with PR2.
+ * Two modes. {@code --gate g1} runs the rigidity gate over a captured mocap CSV and needs nothing
+ * else -- no URDF, no encoders. {@code --calibrate} runs A' over a capture set plus a URDF and
+ * writes a {@code CalibrationResult}, then reports G2 and G4 on the result.
  * </p>
  *
  * <pre>
  * CalibrationRunner --gate g1 --input capture.csv --sigma 0.0003
+ *
+ * CalibrationRunner --calibrate --input capture.csv --encoders encoders.csv \
+ *                   --urdf robot.urdf --gauge pelvis --sigma 0.0003 --output calibration.json
  * </pre>
  *
  * <p>
@@ -72,7 +89,7 @@ public class CalibrationRunner
 
       try
       {
-         return runGate(arguments, out, err);
+         return arguments.calibrate ? runCalibration(arguments, out, err) : runGate(arguments, out, err);
       }
       catch (IOException e)
       {
@@ -84,6 +101,137 @@ public class CalibrationRunner
          err.println("error: " + e.getMessage());
          return EXIT_USAGE;
       }
+   }
+
+   /**
+    * Fits A' over a capture set and reports on it.
+    * <p>
+    * G2 is run <b>after</b> the fit rather than before, using the solved {@code Δ}. FRAMEWORK.md
+    * §15 describes G2 as running at time zero, and it can -- but the back-projection it performs is
+    * not {@code Δ}-free, so at {@code Δ = I} the spread is inflated by the base offset and the
+    * correlations that say <i>which</i> assumption is wrong get swamped. Run at time zero it is a
+    * conservative smoke test; run with the solved {@code Δ} it is a diagnosis. This prints the
+    * diagnosis.
+    * </p>
+    */
+   private static int runCalibration(Arguments arguments, PrintStream out, PrintStream err) throws IOException
+   {
+      if (arguments.urdf == null)
+         throw new IllegalArgumentException("--calibrate needs --urdf");
+      if (arguments.encoders == null)
+         throw new IllegalArgumentException("--calibrate needs --encoders");
+
+      RobotModelHandle model = RobotModelHandle.fromURDF(arguments.urdf);
+      String gaugeLink = arguments.gauge == null ? model.getBaseLinkName() : arguments.gauge;
+
+      List<EncoderSample> encoderSamples = CsvEncoderLog.read(arguments.encoders);
+      List<Capture> captures = new ArrayList<>();
+      List<MarkerId> markers;
+      List<MarkerCluster> clusters;
+
+      try (CsvReplayMocapSource source = CsvReplayMocapSource.openWithHeaderMarkerSet(arguments.input))
+      {
+         markers = source.getMarkers();
+         clusters = arguments.clusterSpecs.isEmpty() ? inferClusters(markers) : buildClusters(arguments.clusterSpecs, markers);
+
+         while (!source.isFinished() && captures.size() < encoderSamples.size())
+         {
+            MocapFrame frame = source.createFrame();
+
+            if (source.read(frame))
+               captures.add(new Capture(frame, encoderSamples.get(captures.size())));
+         }
+      }
+
+      if (captures.isEmpty())
+         throw new IllegalArgumentException(arguments.input + " and " + arguments.encoders + " share no captures.");
+
+      // Pairing by row index, which is the only thing two independently written logs agree on.
+      // FRAMEWORK.md §18.3 lists a mismatch here as a silent failure -- it reads as an estimator
+      // regression, not as a bookkeeping error -- so the skew is printed rather than assumed away.
+      if (captures.size() != encoderSamples.size())
+         out.println("warning: " + captures.size() + " mocap frames against " + encoderSamples.size() + " encoder samples; using the first "
+               + captures.size() + ". Rows are paired BY INDEX.");
+
+      CaptureSet captureSet = new CaptureSet(markers, model.getJointNames(), clusters, gaugeLink, captures);
+
+      out.println("urdf     " + arguments.urdf + "  (sha256 " + URDFLoader.sha256(arguments.urdf).substring(0, 16) + "...)");
+      out.println("captures " + captureSet.getCaptureCount());
+      out.println("clusters " + describe(clusters) + ", gauge=" + gaugeLink);
+      out.println("skew     " + describeSkew(captureSet));
+      out.println();
+
+      BaseInitializer.GaugeTracking tracking = BaseInitializer.trackGaugeCluster(captureSet);
+      CalibrationReport report = new CalibrationReport();
+      CalibrationResult result = new AlternatingCalibrator().calibrate(captureSet, model, tracking, report);
+
+      result.setProvenance(new CalibrationResult.Provenance(arguments.urdf.toString(),
+                                                            URDFLoader.sha256(arguments.urdf),
+                                                            captureSet.getCaptureCount(),
+                                                            report.getIterationCount(),
+                                                            report.getFinalObjective(),
+                                                            arguments.worldTiltRadians,
+                                                            java.time.ZonedDateTime.now().toString(),
+                                                            arguments.note == null ? "" : arguments.note));
+
+      out.print(report.toTable());
+      out.println();
+
+      if (!report.isConverged())
+         out.println("warning: A' hit the iteration cap with J still falling. The result is NOT converged.");
+      if (!result.getProvenance().hasMeasuredWorldTilt())
+         out.println("warning: no --world-tilt given. FRAMEWORK.md §11: theta must be measured, never assumed (~7 mm of CoM height at 0.5 deg).");
+
+      if (arguments.output != null)
+      {
+         CalibrationResultIO.write(arguments.output, result);
+         out.println("wrote " + arguments.output);
+      }
+
+      out.println();
+
+      GateRunner runner = new GateRunner();
+      runner.add(new BootstrapSpreadGate(captureSet.getCaptures(),
+                                         clusters,
+                                         model,
+                                         result.getClusterToBase(),
+                                         clusterPoses(tracking, captureSet.getCaptureCount()),
+                                         arguments.sigma));
+
+      GateRunner.Report gateReport = runner.runAll();
+      out.print(gateReport.format());
+
+      return gateReport.isPassed() ? EXIT_PASS : EXIT_GATE_NOT_PASSED;
+   }
+
+   private static List<RigidBodyTransformReadOnly> clusterPoses(BaseInitializer.GaugeTracking tracking, int captureCount)
+   {
+      List<RigidBodyTransformReadOnly> poses = new ArrayList<>(captureCount);
+
+      for (int k = 0; k < captureCount; k++)
+         poses.add(tracking.isUsable(k) ? tracking.getClusterToWorld(k) : null);
+
+      return poses;
+   }
+
+   private static String describeSkew(CaptureSet captureSet)
+   {
+      long worst = 0;
+      int withTimestamps = 0;
+
+      for (Capture capture : captureSet.getCaptures())
+      {
+         if (capture.hasTimestamps())
+         {
+            worst = Math.max(worst, Math.abs(capture.getTimestampSkewNanoseconds()));
+            withTimestamps++;
+         }
+      }
+
+      if (withTimestamps == 0)
+         return "UNKNOWN -- no capture has both timestamps, so the mocap/encoder pairing cannot be checked at all (FRAMEWORK.md §18.3)";
+
+      return String.format("worst |mocap - encoder| = %.3f ms over %d captures", worst / 1.0e6, withTimestamps);
    }
 
    private static int runGate(Arguments arguments, PrintStream out, PrintStream err) throws IOException
@@ -232,19 +380,42 @@ public class CalibrationRunner
    private static void printUsage(PrintStream stream)
    {
       stream.println("""
-            Usage: CalibrationRunner --gate g1 --input <csv> --sigma <metres> [options]
+            Usage: CalibrationRunner --gate g1    --input <csv> --sigma <metres> [options]
+                   CalibrationRunner --calibrate --input <csv> --encoders <csv> --urdf <file>
+                                     --sigma <metres> [options]
 
-            Runs a pre-flight gate over a captured mocap log.
+            Mode 1 (--gate): runs a pre-flight gate over a captured mocap log. No URDF,
+            no encoders. G1 is the gate to run first, always -- it is the only one that is
+            purely a mocap-and-mounting question (FRAMEWORK.md §15).
+
+            Mode 2 (--calibrate): runs A' over a capture set plus a URDF, writes a
+            CalibrationResult, and reports G2 on the solved result.
 
             Required:
-              --gate <name>        gate to run. PR1 ships 'g1' (rigidity).
+              --gate <name>        gate to run: 'g1' (rigidity). Mode 1.
+              --calibrate          run the calibration. Mode 2.
               --input <file>       mocap CSV written by MocapFrameRecorder.
               --sigma <metres>     MEASURED per-axis mocap position noise at the gantry,
                                    e.g. 0.0003 for 0.3 mm. There is no default: the wand
                                    residual is an average over the whole lab and is not a
                                    substitute (FRAMEWORK.md §17, §20.1).
 
+            Required for --calibrate:
+              --encoders <file>    encoder CSV (CsvEncoderLog). Rows are paired with the
+                                   mocap rows BY INDEX, and the worst timestamp skew is
+                                   printed -- a mispairing is silent otherwise (§18.3).
+              --urdf <file>        the URDF to calibrate against.
+
             Optional:
+              --output <file>      write the CalibrationResult as JSON.
+              --gauge <link>       link carrying the gauge cluster. Defaults to the URDF
+                                   root link, which is what Delta = ^c T_b is defined
+                                   against. FRAMEWORK.md §1: it must be the pelvis, not
+                                   the torso.
+              --world-tilt <deg>   MEASURED F8 world tilt. Recorded in provenance. With no
+                                   value the result records NaN and says so, which is the
+                                   honest encoding of "nobody measured it" (§11).
+              --note <text>        free-form note recorded in provenance.
               --cluster <name>=<m1,m2,...>   define a cluster explicitly. Repeatable.
                                    Without this, clusters are inferred from marker names by
                                    the prefix before the last underscore: PELVIS_1, PELVIS_2
@@ -266,7 +437,14 @@ public class CalibrationRunner
    static final class Arguments
    {
       String gate;
+      boolean calibrate = false;
       Path input;
+      Path encoders;
+      Path urdf;
+      Path output;
+      String gauge;
+      String note;
+      double worldTiltRadians = Double.NaN;
       double sigma = Double.NaN;
       double sigmaMultiplier = RigidityGate.DEFAULT_SIGMA_MULTIPLIER;
       int minimumSamples = RigidityGate.DEFAULT_MINIMUM_SAMPLES;
@@ -289,6 +467,13 @@ public class CalibrationRunner
             {
                case "--help", "-h" -> arguments.help = true;
                case "--gate" -> arguments.gate = value(args, ++i, "--gate");
+               case "--calibrate" -> arguments.calibrate = true;
+               case "--encoders" -> arguments.encoders = Path.of(value(args, ++i, "--encoders"));
+               case "--urdf" -> arguments.urdf = Path.of(value(args, ++i, "--urdf"));
+               case "--output" -> arguments.output = Path.of(value(args, ++i, "--output"));
+               case "--gauge" -> arguments.gauge = value(args, ++i, "--gauge");
+               case "--note" -> arguments.note = value(args, ++i, "--note");
+               case "--world-tilt" -> arguments.worldTiltRadians = Math.toRadians(Double.parseDouble(value(args, ++i, "--world-tilt")));
                case "--input" -> arguments.input = Path.of(value(args, ++i, "--input"));
                case "--sigma" -> arguments.sigma = positiveDouble(value(args, ++i, "--sigma"), "--sigma");
                case "--sigma-multiplier" -> arguments.sigmaMultiplier = positiveDouble(value(args, ++i, "--sigma-multiplier"), "--sigma-multiplier");
@@ -301,8 +486,10 @@ public class CalibrationRunner
          if (arguments.help)
             return arguments;
 
-         if (arguments.gate == null)
-            throw new IllegalArgumentException("--gate is required");
+         if (arguments.gate == null && !arguments.calibrate)
+            throw new IllegalArgumentException("one of --gate or --calibrate is required");
+         if (arguments.gate != null && arguments.calibrate)
+            throw new IllegalArgumentException("--gate and --calibrate are separate modes; pass one");
          if (arguments.input == null)
             throw new IllegalArgumentException("--input is required");
          if (Double.isNaN(arguments.sigma))

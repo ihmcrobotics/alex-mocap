@@ -5,17 +5,17 @@
   Shape, and why it is this shape:
 
     pelvis                          <- the base link, frame `b`. Carries the gauge cluster.
-      +- l_hip   (revolute, y)      <- branch 1
+      +- l_hip   (revolute, x)      <- branch 1: ROLL, and that matters. See below.
       |    l_thigh
       |      +- l_knee  (revolute, y)
       |           l_shank
-      |             +- l_ankle (revolute, x)
+      |             +- l_ankle (revolute, y)
       |                  l_foot
-      +- r_hip   (revolute, y)      <- branch 2
+      +- r_hip   (revolute, x)      <- branch 2
            r_thigh
              +- r_knee  (revolute, y)
                   r_shank
-                    +- r_ankle (revolute, x)
+                    +- r_ankle (revolute, y)
                          r_foot
 
   TWO serial branches, not one. PR_PLAN.md requires this and the reason is F5: `Delta` is a
@@ -25,11 +25,26 @@
   displaced in y breaks that. FRAMEWORK.md §7 makes the same point from the other side:
   pelvis-cluster markers contribute nothing to `Delta` beyond a constant.
 
-  MIXED JOINT AXES, not all-pitch. Hip and knee rotate about y, ankle about x. Three parallel
-  axes per branch would leave marker motion confined to a plane per branch, and the rotational
-  part of `Delta` about that plane's normal would be weakly observable. The calibration would
-  converge and the recovered `Delta` would be wrong in a way no residual reports. This is the
-  toy-scale version of FRAMEWORK.md §1's "wide joint excursion" requirement.
+  THE HIP ROLLS, and this is the single most load-bearing choice in the file.
+
+  Replacing `Delta` by `Delta * G` for a pure translation `g` shifts every layout by
+  `R_i(q)^T g`. That is an exact symmetry (identical `J`, different answer) precisely when
+  `R_i(q)^T g` is the same at every capture, which happens when `g` lies along an axis that
+  every marked link merely rotates about.
+
+  An earlier version of this file had hip and knee both pitching about y, with the ankle the
+  only x joint. With the pelvis, thighs and shanks marked, every marked link's orientation was
+  then a rotation about y alone, so a translation along y was FREE. A' converged to
+  `J = 7.6e-29` (machine zero, a perfect fit) and landed 13 mm from the planted truth, with
+  every cluster displaced by the same vector. Marking the feet closed the symmetry but left it
+  barely conditioned: at `sigma = 0.3 mm` the layout error was 1.77 mm against a `sigma/sqrt(K)`
+  expectation of 0.055 mm, a 6x variance amplification, and A' needed ~200 iterations.
+
+  With the hip rolling about x and knee/ankle pitching about y, the thigh's orientation is
+  `R_x(q_hip)` and the shank's is `R_x(q_hip) R_y(q_knee)`. No single `g` survives both, so
+  there is no degenerate direction to condition badly. This is the toy-scale version of
+  FRAMEWORK.md §1's "wide joint excursion" requirement, and the lesson it encodes is that the
+  failure mode of poor excursion is a SMALL residual and a WRONG answer.
 
   ASYMMETRIC LINK LENGTHS between left and right (0.30/0.28 vs 0.29/0.27). A left-right mirror
   symmetric robot admits a discrete reflection ambiguity; the asymmetry removes it so a test
@@ -56,7 +71,7 @@
     <parent link="pelvis"/>
     <child link="l_thigh"/>
     <origin xyz="0.0 0.09 -0.02" rpy="0 0 0"/>
-    <axis xyz="0 1 0"/>
+    <axis xyz="1 0 0"/>
     <limit lower="-1.6" upper="1.6" effort="150.0" velocity="8.0"/>
   </joint>
 
@@ -88,7 +103,7 @@
     <parent link="l_shank"/>
     <child link="l_foot"/>
     <origin xyz="0.0 0.0 -0.28" rpy="0 0 0"/>
-    <axis xyz="1 0 0"/>
+    <axis xyz="0 1 0"/>
     <limit lower="-0.7" upper="0.7" effort="90.0" velocity="8.0"/>
   </joint>
 
@@ -105,7 +120,7 @@
     <parent link="pelvis"/>
     <child link="r_thigh"/>
     <origin xyz="0.0 -0.09 -0.02" rpy="0 0 0"/>
-    <axis xyz="0 1 0"/>
+    <axis xyz="1 0 0"/>
     <limit lower="-1.6" upper="1.6" effort="150.0" velocity="8.0"/>
   </joint>
 
@@ -137,7 +152,7 @@
     <parent link="r_shank"/>
     <child link="r_foot"/>
     <origin xyz="0.0 0.0 -0.27" rpy="0 0 0"/>
-    <axis xyz="1 0 0"/>
+    <axis xyz="0 1 0"/>
     <limit lower="-0.7" upper="0.7" effort="90.0" velocity="8.0"/>
   </joint>
 

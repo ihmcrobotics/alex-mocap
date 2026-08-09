@@ -190,11 +190,12 @@ public class RobotModelHandleTest
       model.updateFrames();
       model.packLinkToBase("l_foot", t);
 
-      // R_y(θ) takes the hip-relative arm (0, 0, armZ) to (armZ·sinθ, 0, armZ·cosθ).
+      // l_hip is a ROLL joint: R_x(θ) takes the hip-relative arm (0, 0, armZ) to
+      // (0, -armZ·sinθ, armZ·cosθ). See the URDF header for why the hip rolls rather than pitches.
       double armZ = -0.58;
-      assertEquals(armZ * Math.sin(0.5), t.getTranslationX(), 1.0e-9);
+      assertEquals(0.0, t.getTranslationX(), EPSILON, "l_hip rotates about x; the foot must not leave its x plane.");
+      assertEquals(0.09 - armZ * Math.sin(0.5), t.getTranslationY(), 1.0e-9);
       assertEquals(-0.02 + armZ * Math.cos(0.5), t.getTranslationZ(), 1.0e-9);
-      assertEquals(0.09, t.getTranslationY(), EPSILON, "l_hip rotates about y; the foot must not leave its y plane.");
 
       // The other branch must not have moved.
       model.packLinkToBase("r_foot", t);

@@ -48,6 +48,13 @@ dependencies {
     implementation(libs.ejml.core)
     implementation(libs.ejml.ddense)
 
+    // implementation, not api, for the same reason as EJML: SCS2 is an internal detail of
+    // `model`. URDFLoader takes a Path and hands back a Mecano RigidBodyBasics, so no
+    // RobotDefinition, URDFModel, or other SCS2 type appears in a signature anywhere in this
+    // project. That containment is what makes the FRAMEWORK.md §19 rule checkable -- and
+    // PackageDependencyTest checks it, rather than trusting this comment.
+    implementation(libs.scs2.definition)
+
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)
     // Tests reach into EJML directly to build matrices with planted singular values.

@@ -29,8 +29,10 @@ import us.ihmc.alexMocap.registration.RigidBodyRegistration;
  * <li><b>{@code calibration} and {@code runtime} never import each other.</b> {@code
  * CalibrationResult} lives in {@code core} for exactly this reason. The moment one imports the
  * other, the offline calibration and the 200 Hz runtime loop are one component.</li>
- * <li><b>Nothing outside {@code scs2} imports {@code scs2}.</b> That is what keeps the whole
- * calibration headless-testable in CI with no display.</li>
+ * <li><b>Nothing outside {@code scs2} imports the SCS2 <i>visualizer</i>.</b> That is what keeps
+ * the whole calibration headless-testable in CI with no display. See
+ * {@link #testOnlyModelReachesScs2AndOnlyItsHeadlessHalf()} for why this is stated in terms of
+ * the visualizer rather than of SCS2 as a whole.</li>
  * </ul>
  * <p>
  * The scan looks for internal class names in each class file's constant pool. Any type a class
@@ -107,6 +109,101 @@ public class PackageDependencyTest
 
       if (!violations.isEmpty())
          fail("Dependency direction violated (FRAMEWORK.md §19):\n  " + String.join("\n  ", new TreeSet<>(violations)));
+   }
+
+   /**
+    * FRAMEWORK.md §19 as it is actually meant, enforced against the <b>external</b> SCS2 library
+    * rather than against this project's own {@code scs2} package.
+    *
+    * <h2>Why this test has to exist separately</h2>
+    * <p>
+    * {@link #testDependencyDirection()} scans for {@code us/ihmc/alexMocap/} names only. It is
+    * therefore completely blind to {@code import us.ihmc.scs2.…}, which means the rule everyone
+    * believes is being enforced -- "core packages see only Euclid, Mecano, and EJML" -- was in fact
+    * enforced nowhere. Any package could have taken a dependency on SCS2 and no test would have
+    * moved. That is the precise failure mode the dependency test was written to prevent, so leaving
+    * it would have been worse than not having the rule at all.
+    * </p>
+    *
+    * <h2>What the rule became, and why it was narrowed</h2>
+    * <p>
+    * SCS2 ships as separate artifacts. {@code scs2-definition} is headless: it is
+    * {@code URDFTools}, {@code RobotDefinition}, and {@code RobotDefinition.newInstance()} which
+    * hands back a Mecano tree. It pulls no JavaFX and pins the same euclid and mecano versions this
+    * project already declares. {@code scs2-session-visualizer-jfx} is the one that needs a display.
+    * </p>
+    * <p>
+    * §19's stated motive is headless-testability, and that motive is satisfied by banning the
+    * visualizer. Banning {@code scs2-definition} as well would buy nothing and cost a hand-written
+    * URDF parser. So the rule enforced here is the narrower one:
+    * </p>
+    * <ul>
+    * <li>Only {@code model} may reference SCS2 at all, and only {@code us/ihmc/scs2/definition/}.
+    * {@code URDFLoader} keeps every SCS2 type inside method bodies, which is why the Gradle
+    * dependency is {@code implementation} and not {@code api}.</li>
+    * <li>Nothing outside the {@code scs2} package may reference any other SCS2 subpackage --
+    * {@code session}, {@code simulation}, {@code sharedMemory} and friends. When PR3 adds the
+    * visualizer, this is the line it must not cross.</li>
+    * </ul>
+    */
+   @Test
+   public void testOnlyModelReachesScs2AndOnlyItsHeadlessHalf() throws IOException, URISyntaxException
+   {
+      Path classesRoot = mainClassesDirectory();
+      List<String> violations = new ArrayList<>();
+
+      try (Stream<Path> files = Files.walk(classesRoot))
+      {
+         for (Path classFile : files.filter(p -> p.toString().endsWith(".class")).toList())
+         {
+            String owner = packageOf(classesRoot.relativize(classFile).toString().replace('\\', '/'));
+            String contents = new String(Files.readAllBytes(classFile), java.nio.charset.StandardCharsets.ISO_8859_1);
+
+            for (String referenced : new TreeSet<>(referencedExternalScs2Packages(contents)))
+            {
+               boolean headless = referenced.startsWith("definition/");
+
+               if (owner.equals("scs2"))
+                  continue;
+
+               if (owner.equals("model") && headless)
+                  continue;
+
+               violations.add(classesRoot.relativize(classFile) + " references SCS2 '" + referenced + "'. "
+                     + (headless ? "Only 'model' may use scs2-definition." : "Only the 'scs2' package may use SCS2 beyond scs2-definition."));
+            }
+         }
+      }
+
+      if (!violations.isEmpty())
+         fail("SCS2 containment violated (FRAMEWORK.md §19):\n  " + String.join("\n  ", new TreeSet<>(violations)));
+   }
+
+   /** Every {@code us/ihmc/scs2/<pkg>/} occurrence in a class file's constant pool. */
+   private static Set<String> referencedExternalScs2Packages(String classFileContents)
+   {
+      String prefix = "us/ihmc/scs2/";
+      Set<String> packages = new TreeSet<>();
+      int index = classFileContents.indexOf(prefix);
+
+      while (index >= 0)
+      {
+         int start = index + prefix.length();
+         int end = start;
+
+         while (end < classFileContents.length() && isInternalNameCharacter(classFileContents.charAt(end)))
+            end++;
+
+         String remainder = classFileContents.substring(start, end);
+         int lastSlash = remainder.lastIndexOf('/');
+
+         if (lastSlash > 0)
+            packages.add(remainder.substring(0, lastSlash + 1));
+
+         index = classFileContents.indexOf(prefix, end);
+      }
+
+      return packages;
    }
 
    /**

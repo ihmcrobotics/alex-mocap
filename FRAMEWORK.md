@@ -136,7 +136,32 @@ implementation.
 ## 3. F1 — FK reference
 
 ${}^{b}T_i(q)$ from the URDF inertial and kinematic blocks, evaluated by Mecano.
-Set joint angles, update frames, read `RigidBodyBasics.getBodyFixedFrame()`.
+Set joint angles, update frames, read the link frame.
+
+**The link frame is the URDF link frame, `parentJoint.getFrameAfterJoint()` —
+not `RigidBodyBasics.getBodyFixedFrame()`.** An earlier draft of this section
+said the latter. It does not mean what it looks like: Mecano's body-fixed frame
+is the link's *centre-of-mass* frame, sitting at the inertia pose rather than at
+the URDF link origin (it comes out of the tree literally named `l_thighCoM`).
+
+Either convention is internally consistent for the calibration itself — ${}^{i}p_{ij}$
+is unknown and solved for, so a constant offset is absorbed into the layouts and
+into $\Delta$, and $J$ is identical. §12 and §14 are what decide it. §12 computes
+CoM as $\sum_i m_i \cdot {}^{W_g}\hat T_i \cdot {}^{i}c_i$, and §14 carries a
+$\delta({}^{i}c_i)$ term for link-CoM error. Both presuppose that ${}^{i}c_i$ is a
+real, generally non-zero vector read from the URDF inertial block. In the CoM
+frame ${}^{i}c_i$ is identically zero, that term vanishes, and the second-largest
+entry in the error budget silently stops existing.
+
+**Note also that SCS2 does not instantiate the URDF root link as the tree root.**
+It creates a synthetic body (`rootBody`) and attaches the URDF root beneath it
+through a `SixDoFJoint` that appears nowhere in the URDF. The base frame $b$ is
+the frame *after* that joint. Taking the synthetic root's frame instead is both
+the obvious reading and wrong: every ${}^{b}T_i$ would then include the floating
+joint, and §0's load-bearing claim that ${}^{b}T_i(q)$ is a function of joint
+angles alone would quietly stop holding. `RobotModelHandleTest` asserts the
+invariant directly — move the floating joint to a random pose, and no
+${}^{b}T_i$ may change.
 
 There is no algorithm to write here. Status: **assumed** — the URDF is trusted
 to a reasonable degree for joint offsets and link geometry. This assumption is
@@ -551,7 +576,7 @@ Root: `us.ihmc.comgt` — nested to avoid a split package with the existing
 
 | Stage | Package | Type | What the libraries give free |
 |---|---|---|---|
-| F1 | `model` | `RobotModelHandle` | Mecano: `setQ`, `updateFrames`, `getBodyFixedFrame` |
+| F1 | `model` | `URDFLoader`, `RobotModelHandle` | SCS2: URDF parsing. Mecano: `setQ`, `updateFramesRecursively`, `getFrameAfterJoint` (see §3) |
 | F2 | `calibration` | `BaseInitializer` | — |
 | F3 | `calibration` | `BootstrapSolver` | — |
 | F4 | `calibration` | `MarkerLayoutSolver` | Euclid: `FramePoint3D.changeFrame` *is* the back-projection |
@@ -579,8 +604,18 @@ everything                         ←  scs2
   lives in `core` for exactly this reason.
 - `gates` does not import `calibration`. G2 evaluates F4 per-capture directly,
   which is what lets it run before the calibrator exists.
-- Nothing outside `scs2` imports `scs2`. Core packages see only Euclid, Mecano,
-  and EJML, so the whole calibration is headless-testable.
+- **SCS2 is split, and so is this rule.** `scs2-definition` is headless — it is
+  `URDFTools`, `RobotDefinition`, and `RobotDefinition.newInstance()` handing back
+  a Mecano tree — and pulls no JavaFX. `scs2-session-visualizer-jfx` is the one
+  that needs a display. Only `model` may touch `scs2-definition`, and only inside
+  method bodies: `URDFLoader` takes a `Path` and returns a Mecano `RigidBodyBasics`,
+  so no SCS2 type reaches any signature and the Gradle dependency is
+  `implementation`, not `api`. Nothing outside `scs2` may touch any other part of
+  SCS2. The calibration therefore stays headless-testable, which was the point.
+  `PackageDependencyTest` enforces both halves by scanning compiled classes for
+  `us/ihmc/scs2/` — the older rule, phrased against this project's own `scs2`
+  package, was checked by nothing and any package could have taken the dependency
+  without a test moving.
 
 ### Libraries
 

@@ -10,3 +10,12 @@ build
 .classpath
 .settings/
 bin/
+
+# IntelliJ project metadata. Same reasoning as the Eclipse entries above: machine-specific and
+# regenerated on import. It has sat untracked-and-unignored on every branch of this repository,
+# showing up as noise in `git status` on all of them (CLAUDE.md listed it as an open item).
+.idea/
+
+# Agent worktrees and scratch. `.claude/worktrees/` holds full checkouts of this repository, so a
+# stray `git add -A` from the wrong directory would commit the repository into itself.
+.claude/

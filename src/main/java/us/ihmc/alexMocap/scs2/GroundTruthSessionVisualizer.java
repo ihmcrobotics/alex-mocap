@@ -10,6 +10,9 @@ import java.util.List;
 import us.ihmc.alexMocap.core.EncoderSample;
 import us.ihmc.alexMocap.core.GroundTruthSample;
 import us.ihmc.euclid.referenceFrame.ReferenceFrame;
+import us.ihmc.euclid.transform.interfaces.RigidBodyTransformReadOnly;
+import us.ihmc.mecano.multiBodySystem.interfaces.FloatingJointBasics;
+import us.ihmc.mecano.multiBodySystem.interfaces.JointBasics;
 import us.ihmc.mecano.multiBodySystem.interfaces.OneDoFJointBasics;
 import us.ihmc.scs2.definition.geometry.GeometryDefinition;
 import us.ihmc.scs2.definition.geometry.ModelFileGeometryDefinition;
@@ -121,6 +124,7 @@ public class GroundTruthSessionVisualizer
       session.setSessionDTSeconds(1.0 / sampleRateHz);
 
       Robot robot = session.addRobot(robotDefinition);
+      JointBasics floatingJoint = findFloatingJoint(robot);
 
       GroundTruthYoVariables variables = new GroundTruthYoVariables("gt", samples.get(0).getLinkNames(), gravityAlignedWorld);
       session.getRootRegistry().addChild(variables.getRegistry());
@@ -133,7 +137,7 @@ public class GroundTruthSessionVisualizer
          int index = Math.min(sampleIndex[0], samples.size() - 1);
 
          variables.update(samples.get(index));
-         setRobotConfiguration(robot, encoderSamples.get(index));
+         setRobotConfiguration(robot, floatingJoint, encoderSamples.get(index), samples.get(index).getPelvisPose());
 
          // Stop on the last sample instead of spinning on it forever. Without this the session
          // keeps ticking, re-publishing the final capture, and the buffer fills with copies of one
@@ -194,7 +198,7 @@ public class GroundTruthSessionVisualizer
     * an afternoon wondering why a link has no shape.
     * </p>
     */
-   private static void dropUnrepresentableGeometry(RobotDefinition robotDefinition, Path urdfFile)
+   static void dropUnrepresentableGeometry(RobotDefinition robotDefinition, Path urdfFile)
    {
       int[] droppedCollisions = {0};
       int[] droppedVisuals = {0};
@@ -263,7 +267,59 @@ public class GroundTruthSessionVisualizer
    }
 
    /** Poses the drawn robot at one capture's encoder reading. */
-   private static void setRobotConfiguration(Robot robot, EncoderSample encoderSample)
+   /**
+    * The joint SCS2 inserts above the URDF root link. There is exactly one.
+    * <p>
+    * Found by type rather than by name or position. The name is SCS2's to choose, and
+    * {@code getChildrenJoints().get(0)} would silently pick a real URDF joint if the tree were ever
+    * built without the synthetic root -- placing the robot by moving its hip.
+    * </p>
+    */
+   static JointBasics findFloatingJoint(Robot robot)
+   {
+      for (JointBasics joint : robot.getRootBody().childrenSubtreeIterable())
+      {
+         if (joint instanceof FloatingJointBasics)
+            return joint;
+      }
+
+      throw new IllegalStateException("No floating joint in the robot SCS2 built from this URDF, so there is nothing to place the robot with. "
+            + "Every URDF gets one -- see URDFLoader's note on the synthetic rootBody.");
+   }
+
+   /**
+    * Poses the drawn robot: joint angles from the encoders, and <b>where it is</b> from the measured
+    * pelvis.
+    *
+    * <h2>Why the base pose has to be set here</h2>
+    * <p>
+    * Setting only the joint angles leaves the floating joint at identity, which draws the robot at
+    * the world origin. That is wrong in a way that is easy to miss and hard to interpret: the gold
+    * CoM sphere and the pelvis triad <i>are</i> in measured world coordinates, so they appear
+    * wherever the robot actually was -- on this capture set about 2.4 m away, at
+    * {@code (1.00, 1.99, 1.41)} -- while the robot itself sits at the origin with its legs below the
+    * grid. It reads as "the robot is floating in the air in a strange pose", which is a description
+    * of the symptom and not of the fault.
+    * </p>
+    * <p>
+    * {@code GroundTruthSample.getPelvisPose()} is {@code ^Wg T̂_b}, the URDF pelvis <b>link</b> frame
+    * in the gravity-aligned world -- see {@code runtime.PelvisStateExtractor} on the
+    * three-pelvis-frames hazard. That is exactly the transform the floating joint holds, so this is
+    * a direct assignment and not a conversion.
+    * </p>
+    *
+    * <h2>A refused pelvis holds the last pose</h2>
+    * <p>
+    * When F6 refuses the pelvis cluster the pose is NaN. Assigning that would put NaN into the
+    * frame tree, where it stays -- every subsequent frame would draw nothing, so one bad capture
+    * would end the replay. Holding the last good pose keeps the robot on screen, and the dropout is
+    * still visible: the CoM sphere vanishes and {@code gtRefusedLinkCount} steps.
+    * </p>
+    */
+   static void setRobotConfiguration(Robot robot,
+                                             JointBasics floatingJoint,
+                                             EncoderSample encoderSample,
+                                             RigidBodyTransformReadOnly pelvisPose)
    {
       for (int i = 0; i < encoderSample.getJointCount(); i++)
       {
@@ -272,6 +328,9 @@ public class GroundTruthSessionVisualizer
          if (robot.getJoint(jointName) instanceof OneDoFJointBasics joint)
             joint.setQ(encoderSample.getQ(i));
       }
+
+      if (!pelvisPose.containsNaN())
+         floatingJoint.setJointConfiguration(pelvisPose);
 
       robot.getRootBody().updateFramesRecursively();
    }

@@ -183,6 +183,28 @@ substituted by FK, which is the conservative branch and the right one.
 - **G2 correlates signed components, not magnitude.** Magnitude is V-shaped in the joint angle, so
   Pearson reads ~0 however strong the dependence.
 
+### The replay drew the robot at the origin (fixed, PR5)
+
+`GroundTruthSessionVisualizer.setRobotConfiguration` set **joint angles only**, leaving the floating
+joint at identity. The CoM sphere and pelvis triad are in measured world coordinates, so they
+appeared where the robot really was — `(1.00, 1.99, 1.41)` on the demo's capture set, a suspended
+gantry pose about **2.4 m from the origin** — while the robot itself was drawn at `(0, 0, 0)` with
+its legs below the grid. It reads as "the robot is floating in the air in a weird pose".
+
+Nothing threw, no number was wrong, and all 195 tests passed. Only the picture was wrong, which is
+this project's failure mode exactly. `VisualizerPlacementTest` now pins it on the real SCS2 `Robot`.
+
+Two details worth keeping: the floating joint is found **by type** (`FloatingJointBasics`), not by
+name or by `getChildrenJoints().get(0)`, because the latter would silently pick a real URDF joint
+and place the robot by bending its hip. And a refused pelvis (NaN pose) **holds the last good pose**
+— assigning NaN puts it in the frame tree permanently, so one bad capture would blank the rest of
+the replay; the dropout is still visible through the CoM sphere vanishing.
+
+Not a bug, and asked about twice now: **the legs really do take strange postures.** The captures are
+a calibration sweep, drawn uniformly across each joint's full URDF range per FRAMEWORK.md §1, and
+that excursion is the signal A′ fits. `AlexLegDemo --excursion <f>` narrows it for legibility at a
+measured cost (in-sample RMS 2.047 mm at 0.3 versus 1.910 mm at 1.0).
+
 ### The failure mode this project has
 
 **Every bug found here was a small residual with a wrong answer, never a loud one.** The gauge
@@ -306,7 +328,7 @@ spelling in a *comment* only. If bare meshes ever come back, that is the thread 
   `integration/README.md`; it needs three edits in the `alex` repo (an `includeBuild`, a dependency,
   a file copy) that were deliberately not applied. APIs were checked with `javap` against
   17-0.33.2, but nothing has been through a compiler.
-- `.idea/` is untracked and unignored on every branch.
+- ~~`.idea/` is untracked and unignored on every branch.~~ Ignored as of PR5, along with `.claude/`.
 - G3 (`VolumeDistortionGate`) is still an empty placeholder — it needs a physical two-marker artifact.
 
 ---

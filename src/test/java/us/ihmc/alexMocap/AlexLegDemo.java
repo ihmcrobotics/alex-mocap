@@ -22,8 +22,21 @@ import us.ihmc.alexMocap.mocap.MocapFrameRecorder;
  * AlexLegDemo                       generate, calibrate, replay, then open SCS2
  * AlexLegDemo --no-visualize        the same without the window (works headless / over SSH)
  * AlexLegDemo --degenerate          the hip-X-only marker set: a perfect-looking, 57 mm-wrong fit
+ * AlexLegDemo --excursion 0.3       narrow the joint sweep -- easier to look at, worse conditioned
  * AlexLegDemo --out /some/dir       write somewhere other than build/alex-demo
  * </pre>
+ *
+ * <h2>What it looks like, and why</h2>
+ * <p>
+ * The robot is drawn <b>where the markers say it was</b> -- suspended around
+ * {@code (1.0, 2.0, 1.4)} for this capture set, not at the origin -- with the gold CoM sphere a few
+ * centimetres inside it. Its legs move through postures no walking robot would adopt, because a
+ * calibration capture session is not a walk: FRAMEWORK.md §1 asks for as much joint excursion as the
+ * robot has, and that excursion is precisely what makes {@code Δ} and the layouts identifiable.
+ * Successive captures are independent draws, so the replay steps between poses rather than sweeping
+ * smoothly through them. {@code --excursion} narrows it if you are looking at the geometry rather
+ * than at the calibration; it makes the fit worse, which is the point of leaving it at 1.0.
+ * </p>
  *
  * <h2>Why this lives in test scope</h2>
  * <p>
@@ -66,6 +79,21 @@ public class AlexLegDemo
       boolean degenerate = List.of(args).contains("--degenerate");
       Path outputDirectory = Path.of(argumentValue(args, "--out", "build/alex-demo")).toAbsolutePath();
 
+      // The default is the full sweep FRAMEWORK.md §1 asks for, and on screen it looks like it:
+      // every joint drawn uniformly across its whole URDF range, so the legs take postures no
+      // walking robot would. That is what a calibration capture session physically is -- the robot
+      // is on a gantry being moved through as much of its range as it has, because that excursion
+      // is what makes Δ and the layouts identifiable.
+      //
+      // This exists so the picture can be made legible when someone is looking at the geometry
+      // rather than at the calibration. It costs conditioning: the excursion is exactly the signal
+      // A′ is fitting, and narrowing it is the documented way to get a fit that "looks converged
+      // and means nothing".
+      double excursion = Double.parseDouble(argumentValue(args, "--excursion", "1.0"));
+
+      if (!(excursion > 0.0) || excursion > 1.0)
+         throw new IllegalArgumentException("--excursion must be in (0, 1], was " + excursion + ".");
+
       Files.createDirectories(outputDirectory);
 
       String[] markedLinks = degenerate ? RobotCaptures.HIP_X_ONLY_MARKED_LINKS : RobotCaptures.PRIMARY_MARKED_LINKS;
@@ -75,6 +103,8 @@ public class AlexLegDemo
       System.out.println("=".repeat(78));
       System.out.println("marked   " + String.join(", ", markedLinks));
       System.out.println("captures " + CAPTURES + " at sigma = " + 1000.0 * SIGMA + " mm");
+      System.out.println("sweep    " + (100.0 * excursion) + "% of each joint's range"
+            + (excursion < 1.0 ? "  (narrowed: conditioning is worse than the default)" : "  (full, per FRAMEWORK.md section 1)"));
       System.out.println("output   " + outputDirectory);
       System.out.println();
 
@@ -82,6 +112,7 @@ public class AlexLegDemo
       RobotCaptures.Options options = new RobotCaptures.Options().captures(CAPTURES)
                                                                  .noise(SIGMA)
                                                                  .randomize(RobotCaptures.LEG_JOINTS)
+                                                                 .excursionFraction(excursion)
                                                                  .marked(markedLinks);
       if (degenerate)
          options.noise(0.0);

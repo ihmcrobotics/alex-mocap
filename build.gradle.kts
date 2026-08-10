@@ -22,6 +22,25 @@ tasks.named<JavaExec>("run") {
     isIgnoreExitValue = true
 }
 
+// AlexLegDemo lives in test scope on purpose -- it depends on RobotCaptures, which invents mocap
+// data and has no business on the shipping classpath. IntelliJ will green-arrow a main out of test
+// sources without complaint, but from a terminal there was no way to run it at all: `run` uses the
+// main source set, and assembling the test runtime classpath by hand is exactly the kind of thing
+// nobody should have to work out twice.
+//
+// isIgnoreExitValue for the same reason as `run` above: the demo exits non-zero when a frame was
+// refused, which on --degenerate is the point being made rather than a build failure.
+tasks.register<JavaExec>("alexLegDemo") {
+    group = "application"
+    description = "The real-Alex leg-marker demonstration: generate -> calibrate -> replay -> SCS2."
+    mainClass = "us.ihmc.alexMocap.AlexLegDemo"
+    classpath = sourceSets["test"].runtimeClasspath
+    isIgnoreExitValue = true
+
+    // Forwarded so the documented flags work: --no-visualize, --degenerate, --out <dir>.
+    systemProperty("alex.sdk.dir", providers.systemProperty("alex.sdk.dir").getOrElse(""))
+}
+
 // Maven coordinates, not decoration. The SCS2 mocap ground-truth track lives in the `alex`
 // repository and consumes this project through Gradle composite-build substitution
 // (`includeBuild`), which matches an included build to a dependency by group:name. Without a

@@ -267,11 +267,25 @@ it from the encoders every tick. Give it its own instance, never the one your si
 
 ## Demonstration: the real Alex model
 
-### Run it — one file, from IntelliJ
+### Run it — one command, or one green arrow
 
-Open `src/test/java/us/ihmc/alexMocap/AlexLegDemo.java` and hit the green arrow on `main`.
+```bash
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+./gradlew alexLegDemo                                  # opens the SCS2 window
+./gradlew alexLegDemo --args="--no-visualize"          # headless / over SSH
+./gradlew alexLegDemo --args="--degenerate"
+```
+
+Or open `src/test/java/us/ihmc/alexMocap/AlexLegDemo.java` in IntelliJ and hit the green arrow
+on `main`. (The Gradle task exists because the demo is in **test** scope — `run` uses the main
+source set, so from a terminal there was previously no way to launch it at all.)
+
 That is the whole thing: it invents a leg-only marker session on the real Alex model, writes
 it out as CSV, calibrates it, replays it, and **opens SCS2**.
+
+Last verified end-to-end: 60/60 frames with every link accepted, error budget printing
+mass 4.904 mm / link-CoM 2.727 mm / mocap 0.164 mm, and meshes resolving from
+`~/workspaces/mocap/ihmc-alex-sdk/alex-models`.
 
 ```
 AlexLegDemo                    generate -> calibrate -> replay -> open the SCS2 window

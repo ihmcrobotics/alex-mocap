@@ -216,6 +216,222 @@ Two things in that output are worth reading rather than skimming. `l_shank`'s wo
 is why the refusal guard is `σ₂` (see *Gotchas*). And the error budget prints §14's
 conclusion outright — the CAD terms are 17× the mocap term, so perfect mocap would buy 1.00×.
 
+## Demonstration: the real Alex model
+
+Everything above is measured on the toy 6-DOF URDF, and every accuracy claim there carries
+the caveat *"this tests the solver, not the robot"*. `AlexLegDemoTest` and
+`AlexLegDemoCliTest` (PR4) point the same shipping classes at the URDF the Python InEKF uses
+— `assets/alex_with_imus.urdf`, vendored byte-identically to
+`src/test/resources/us/ihmc/alexMocap/model/alex.urdf` — with markers on the legs.
+
+**It loads unmodified.** 141 links and 140 joints in the file; SCS2 merges the 111 fixed
+joints and leaves **29 joints / 30 links**, root `PELVIS_LINK`, **91.512588 kg**, mass
+preserved exactly. None of the feared hazards blocks it: the 11 `<capsule>` collisions, 17
+`<gazebo>` blocks and 8 `<mimic>` elements on `type="fixed"` joints are all off the path from
+URDF to Mecano tree, and although 70 links carry no `<inertial>` and 19 declare mass 0 with
+zero inertia, all of them sit below fixed joints and are merged away. Every one of the 30
+surviving links has a finite, strictly positive mass and a finite `^i c_i`, which
+`testTheRealModelLoads` asserts as a tripwire.
+
+You will see roughly a hundred `SDFTools: Unable to resolve the path: package://abilityHand/…`
+lines on stderr. Those are the 17 missing hand meshes. They are cosmetic — visuals never
+reach the Mecano tree — and there is no flag to silence them.
+
+### Running it
+
+```bash
+./gradlew test --tests '*AlexLegDemo*'                          # quiet
+./gradlew test --tests '*AlexLegDemo*' -Dalex.demo.verbose=true # with the tables
+```
+
+The verbose flag is forwarded to the test JVM explicitly in `build.gradle.kts`. Gradle's
+`Test` task does not inherit the launching JVM's system properties, so without that
+forwarding the flag is accepted and silently does nothing.
+
+Both CLIs run on the real model with no new flags and no `--cluster` override — naming
+markers `<LINK>_M<j>` makes the "prefix before the last underscore" convention produce exact
+URDF link names. Real output, 40 captures at σ = 0.3 mm, 7 clusters:
+
+```
+$ ./build/install/alex-mocap/bin/alex-mocap --calibrate \
+      --input capture.csv --encoders encoders.csv --urdf alex.urdf \
+      --sigma 0.0003 --world-tilt 0.08 --output calibration.json
+
+urdf     alex.urdf  (sha256 e453edccdfbc6a86...)
+captures 40
+clusters PELVIS_LINK(4), LEFT_THIGH(4), RIGHT_THIGH(4), LEFT_SHIN(4), RIGHT_SHIN(4), LEFT_FOOT(4), RIGHT_FOOT(4), gauge=PELVIS_LINK
+skew     worst |mocap - encoder| = 0.000 ms over 40 captures
+
+A' calibration report
+  captures            40 usable of 40 (reference capture 0)
+  observations        1120
+  iterations          45 (converged)
+  J after bootstrap   3.773248e+00 m^2
+  J final             4.342767e-03 m^2
+  in-sample RMS       1.9691 mm  (NOT an accuracy claim; see G4)
+  monotone            yes
+  gauge worst sigma3  4.843234e-05 m^2
+  base step sigma3    4.805252e-02 m^2
+  per-marker in-sample residuals
+    link         marker           K_ij   rms (mm)   max (mm)
+    PELVIS_LINK  PELVIS_LINK_M0     40     0.3533     0.6571
+    ...
+    LEFT_THIGH   LEFT_THIGH_M0      40     1.3140     3.3231
+    ...
+    LEFT_SHIN    LEFT_SHIN_M0       40     2.2147     4.5432
+    ...
+    LEFT_FOOT    LEFT_FOOT_M0       40     2.8151     6.1760
+    RIGHT_FOOT   RIGHT_FOOT_M3      40     2.8584     6.9973
+
+  G2: PASS
+```
+
+```
+$ java -cp "build/install/alex-mocap/lib/*" us.ihmc.alexMocap.ReplayRunner \
+      --input capture.csv --encoders encoders.csv --urdf alex.urdf \
+      --calibration calibration.json --output-directory out/ \
+      --world-tilt 0.08 --velocity --error-budget
+
+links        30 total, 7 marked, 23 chained
+chained mass 53.493 of 91.513 kg on encoders (FRAMEWORK.md section 10)
+world tilt   TiltMeasurement[PRECISION_LEVEL, θ=0.0800°, --world-tilt]
+
+Conditioning over 40 frames (40 with every link accepted, 100.0%)
+  link          accept%    below 3     worst s3      mean s3   visible-count histogram
+  PELVIS_LINK    100.0%          0    4.890e-05    5.048e-05   0:0 1:0 2:0 3:0 4:40
+  LEFT_THIGH     100.0%          0    5.439e-06    6.102e-06   0:0 1:0 2:0 3:0 4:40
+  RIGHT_THIGH    100.0%          0    2.833e-05    3.009e-05   0:0 1:0 2:0 3:0 4:40
+  LEFT_SHIN      100.0%          0    2.883e-05    3.075e-05   0:0 1:0 2:0 3:0 4:40
+  RIGHT_SHIN     100.0%          0    3.300e-06    4.025e-06   0:0 1:0 2:0 3:0 4:40
+  LEFT_FOOT      100.0%          0    9.157e-06    1.025e-05   0:0 1:0 2:0 3:0 4:40
+  RIGHT_FOOT     100.0%          0    1.826e-05    1.975e-05   0:0 1:0 2:0 3:0 4:40
+
+CoM error budget (FRAMEWORK.md section 14)
+  total mass                 91.513 kg
+  assumed uncertainties      mass 5.0%, link CoM 5.0 mm/axis, pose 0.300 mm/axis
+  mass error x lever arm        4.690 mm   (CAD)
+  link-CoM error                2.727 mm   (CAD)
+  pose error (mocap)            0.164 mm   <- the only one this pipeline controls
+  total (quadrature)            5.428 mm
+  dominant term              mass
+  perfect mocap would buy    1.00x
+```
+
+**The two lines that actually matter are `chained mass 53.493 of 91.513 kg` and the
+per-marker residual column climbing 0.35 mm → 2.86 mm.** Everything else in that output is
+the toy's story repeated with bigger numbers.
+
+The first says that with the pelvis and six leg links marked, **58.45% of Alex is on
+encoders, not on markers.** `TORSO_LINK` alone is 22.21 kg — 24.3% of the robot — chained off
+the pelvis through one `SPINE_Z` joint, the joint FRAMEWORK §1 refuses to make the gauge
+because "under suspension the spine joint carries the full load in tension with off-axis
+deflection the URDF does not model". Head and both arms (18.6 kg more) chain through it as
+well, and `KinematicChainCoupler` attributes all of them to `PELVIS_LINK` because that is the
+nearest *marked* ancestor. **Adding one torso cluster takes the chained fraction from 58.45%
+to 34.18%** — the highest-leverage marker decision available after the gauge itself.
+
+The second is the gauge cluster's angular error times the lever arm out to each link, and on
+Alex it is worse than on the toy for a purely geometric reason: pelvis origin to foot is
+0.89 m here against roughly 0.6 m there. See the next section.
+
+### Watch out for — the real Alex model
+
+1. **A 140 mm gauge bracket is not enough on Alex.** At FRAMEWORK §1's recommended 120–150 mm
+   and §17's 0.3 mm target noise, held-out marker RMS is **2.86 mm — above the TALOS 2.2 mm
+   bar §15 names as the target — on synthetic data with a perfect URDF and nothing wrong but
+   mocap noise.** Measured over a 5× range of bracket widths and three noise levels
+   (3-seed means, K = 40, held-out RMS in mm):
+
+   | gauge spread | σ = 0.93 mm | σ = 0.30 mm | σ = 0.10 mm |
+   |---|---|---|---|
+   | 60 mm | 20.44 | 6.56 | 2.18 |
+   | 140 mm | 8.87 | **2.86** | 0.95 |
+   | 200 mm | 6.34 | 2.04 | 0.68 |
+   | 300 mm | 4.44 | 1.43 | 0.48 |
+
+   That is §1's `σ/(√N·r_perp)` to within a couple of percent in both variables — linear in σ
+   (0.93/0.30 = 3.10 against a measured 8.87/2.86 = 3.10) and inverse in the spread
+   (140/60 = 2.33 against 6.56/2.86 = 2.29). Collected:
+
+   ```
+   held-out RMS  ≈  2.86 mm · (σ / 0.3 mm) · (140 mm / gauge spread)
+   ```
+
+   **To clear 2.2 mm on Alex you need a bracket of at least ~182 mm at σ = 0.3 mm, or
+   σ ≤ 0.23 mm at 140 mm.** §1's recommendation has no lever arm in it. Pinned by
+   `testHeldOutResidualMissesTheTalosBarAtTheRecommendedBracketWidth`.
+
+2. **SCS2 rewrites the URDF's link frames, and it is on by default.**
+   `URDFTools.toRobotDefinition` calls `RobotDefinition.transformAllFramesToZUp()` —
+   **default `true`**, alongside `simplifyKinematics` — which walks the tree zeroing the
+   rotation of every joint's `transformToParent` and compensating by rotating, in place: the
+   joint axis, the inertia pose, the moment of inertia, and every child joint's transform.
+   Kinematics and physics are exactly preserved; **the identity of the link frame is not.**
+   For any link below a joint with a non-zero `<origin rpy>` — on Alex, everything from the
+   shoulders outward — SCS2's frame is the URDF's frame rotated by the accumulated joint
+   rotation.
+
+   The consequence: `RobotModelHandle`'s javadoc promises that "a calibrated `^i p̂_ij`
+   printed by this pipeline is directly comparable to a CAD marker position". **That does not
+   hold for Alex's arms.** `LEFT_SHOULDER_Y_LINK`'s `^i c_i` comes back as
+   `(-0.00264, +0.09735, +0.07277)` where the URDF's `<inertial><origin>` says
+   `(-0.00264, 0.12135, -0.006824)`; the difference is exactly `R_x(0.698132)`, its parent
+   joint's declared `rpy`. It *does* hold for the legs, where every joint declares
+   `rpy="0 0 0"` — which is the set this demonstration marks. Nothing is numerically wrong:
+   `^i p_ij` is solved for, `^i c_i` and `^b T_i` are consistent with each other, and F9/F11
+   are unaffected. It is a *reading* hazard, and it is invisible on the toy URDF, which
+   declares `rpy="0 0 0"` on all six joints.
+
+   `setTransformToZUp(false)` on `URDFParserProperties` would turn it off. That is a
+   specification change to §3, not an implementation one, so it is not done here.
+
+3. **A green G2 on Alex is not "no joint offset".** At σ = 0.3 mm, a 0.5° `LEFT_HIP_Y` offset
+   does **not** fire G2 — the worst affected marker (`LEFT_FOOT`) spreads 3.59 mm against
+   2.08 mm expected, a ratio of 1.7 against a 3σ threshold. Alex's gauge-driven floor at the
+   target noise is simply larger than the fault. The *indictment column is still correct*
+   (`LEFT_THIGH` names `LEFT_HIP_Y` at r = 0.60); only the verdict is green. At σ = 0.05 mm it
+   fires hard. G2's sensitivity to a joint offset scales with the gauge cluster's angular
+   accuracy, not with the number of captures — the same lever as item 1.
+
+4. **G2 fires on both branches on a one-branch fault.** On the toy the unaffected branch
+   showed nothing. On Alex it shows about half: at σ = 0.05 mm with a 0.5° `LEFT_HIP_Y`
+   offset, `LEFT_SHIN` 1.47 mm / `RIGHT_SHIN` 0.76 mm and `LEFT_FOOT` 2.29 mm /
+   `RIGHT_FOOT` 1.08 mm. G2 is handed the **solved** `Δ`, and A′ absorbs part of a
+   one-branch fault into `Δ`, which is global. The localisation claim that survives on a real
+   robot is the **mirror comparison**, not "the other branch is clean".
+
+5. **The hip-X-only marked set is exactly degenerate, and nothing catches it.** Marking only
+   `PELVIS_LINK` and both `*_HIP_X_LINK`: `PELVIS_LINK` does not rotate relative to the base
+   and `*_HIP_X_LINK`'s orientation is `R_x(q)` about an axis that is **the same `(1 0 0)` on
+   both sides**, so a translation along `x` is an exact symmetry of `J`. At a 200-iteration
+   cap the fit reports `J = 3.02e-6 m²` and an in-sample RMS of **0.112 mm on data with no
+   noise in it**, writes a fully-solved `CalibrationResult`, exits 0, and passes G2 — and the
+   layout is **57.3 mm wrong**, every marker displaced by the same 55.9 mm vector along `x`.
+   `σ₃` does not detect it: 8.79e-4 m² here against 2.21e-3 m² for the identifiable
+   pelvis+thighs set (a factor of 2.5), where the factor separating two sets that are *both*
+   identifiable is 26. **There is no threshold on `σ₃` that separates "degenerate" from
+   "merely awkward".** This is PR2's toy finding reproduced at Alex scale;
+   `AlexLegDemoCliTest` pins the operational half of it.
+
+6. **Alex's joint ranges are narrower than the toy's, and the base step feels it.** Hip-X is
+   70° against the toy's 183°; hip-Z 80°, ankle-X 50°. Rank survives that, conditioning does
+   not. At a 5% excursion fraction the base step's `σ₃` falls only 7.6× (4.86e-2 → 6.42e-3)
+   while the layout error goes from 0.31 mm to **34.96 mm** and A′ hits its iteration cap.
+   **Read `isConverged()`, not `σ₃`** — the conditioning number moves by less than an order of
+   magnitude for a hundredfold loss of accuracy.
+
+7. **Both knees declare `lower="0"`**, so a rest angle of zero sits exactly on the limit.
+   `RobotCaptures` reports that rather than clamping silently, because a generator that
+   silently clamps gives the same answer as one that silently does not, and that is the
+   situation in which a genuinely out-of-range rest angle goes unnoticed.
+
+8. **Report base pose position and rotation separately.** At σ = 0.3 mm, K = 30 the base
+   position error is 0.84 mm and the base *rotation* error is 7.63 mrad (0.437°) — and the
+   rotation is the one that matters, because 0.44° at the pelvis is 6.8 mm at a foot 0.89 m
+   away. It is also, unchanged, the frame-to-frame noise on the runtime pelvis *orientation*
+   F10 hands to the EKF comparison: F6 is single-frame with no averaging (§9). The toy's
+   helper took the max of the two, which hid this.
+
 ### The visualizer
 
 ```bash
@@ -901,7 +1117,8 @@ Reports land in `build/reports/tests/test/index.html`; machine-readable results 
 `build/test-results/test/*.xml`. `testLogging` is configured to dump full stack traces on
 failure, so a CI log is enough to diagnose without fetching the report.
 
-Currently 148 tests, no external resources, no display, no hardware:
+Currently 168 tests, no external resources, no display, no hardware. Two URDFs are checked in
+— the toy 6-DOF one and the real Alex one — and nothing else is read from outside the repo:
 
 | Class | Covers |
 |---|---|
@@ -923,6 +1140,8 @@ Currently 148 tests, no external resources, no display, no hardware:
 | `postprocess.COMErrorBudgetTest` | 1% mass perturbation against the closed form pinned and unpinned, link-CoM and pose terms, §14's conclusion that CAD dominates, and the flip side once inertials are measured |
 | `ReplayRunnerTest` | both CLIs end to end: capture → `--calibrate` → replay → CoM trajectory, NaN velocity edges, refused frame exits non-zero, unmeasured tilt visible |
 | `PackageDependencyTest` | the FRAMEWORK.md §19 dependency table, by scanning compiled class files; SCS2 containment against the external library; JavaFX and YoVariables confined to `scs2` |
+| `AlexLegDemoTest` | **the real 91.5 kg Alex model**: 29 joints / 30 links / finite inertials after the fixed-joint merge, SCS2's link-frame rewrite, noiseless exactness, σ = 0.3 mm and σ = 0.93 mm recovery, monotonicity, **the hip-X-only degeneracy**, narrow-sweep conditioning collapse, **58.45% chained mass**, CoM vs Mecano to 1e-9 on 91.5 kg, G2 clean / fired / floored, **the 140 mm bracket missing the TALOS bar** |
+| `AlexLegDemoCliTest` | both shipping CLIs unchanged on the real model, cluster inference producing exact URDF link names with no `--cluster`, and the degenerate marked set exiting 0 while being 56 mm wrong |
 
 ### Reading the tests
 

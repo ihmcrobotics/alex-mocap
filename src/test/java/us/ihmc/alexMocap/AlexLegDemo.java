@@ -44,6 +44,25 @@ import us.ihmc.alexMocap.mocap.MocapFrameRecorder;
  */
 public class AlexLegDemo
 {
+   /**
+    * Where to find a URDF whose meshes are also on disk, for the 3-D view.
+    * <p>
+    * The vendored {@code alex.urdf} is byte-identical to the source and is what the tests use, so
+    * that CI needs nothing outside this repo. But its meshes are <b>not</b> beside it: they live in
+    * {@code assets/alex_virtual_description/}, and {@code package://} resolves relative to the
+    * URDF's own directory. Handing the vendored copy to the visualizer therefore renders a robot
+    * with no shapes at all -- a CoM sphere floating in empty space.
+    * </p>
+    * <p>
+    * So for the <i>view</i> only, prefer a URDF that still has its meshes next to it. Same bytes,
+    * same model, same sha256 in the provenance -- only the mesh lookup differs. {@code ALEX_URDF}
+    * is the environment variable the Python estimator already uses for this, so it is honoured
+    * here rather than inventing a second convention.
+    * </p>
+    */
+   private static final String[] URDF_WITH_MESHES_CANDIDATES = {System.getProperty("alex.urdf"), System.getenv("ALEX_URDF"),
+         System.getProperty("user.home") + "/alex/invariant-estimation/assets/alex_with_imus.urdf"};
+
    /** FRAMEWORK.md §17's target for a tight volume at the gantry. */
    private static final double SIGMA = 0.3e-3;
 
@@ -79,7 +98,18 @@ public class AlexLegDemo
       RobotCaptures.Planted planted = RobotCaptures.generate(options);
       writeCaptureSession(outputDirectory, planted);
 
+      // The model is identical either way; only whether its meshes can be found differs.
+      Path modelUrdf = urdfWithMeshes().orElse(outputDirectory.resolve("alex.urdf"));
+
       System.out.println("[1/3] wrote capture.csv, encoders.csv, alex.urdf");
+      System.out.println("      model    " + modelUrdf);
+
+      if (visualize && !urdfWithMeshes().isPresent())
+      {
+         System.out.println("      note: no URDF found with its meshes beside it, so the robot will draw as bare");
+         System.out.println("            frames. Set ALEX_URDF or -Dalex.urdf to the original to see its shapes.");
+      }
+
       System.out.println();
 
       // ---- 2. calibrate ----------------------------------------------------------------------
@@ -88,7 +118,7 @@ public class AlexLegDemo
       System.out.println("-".repeat(78));
 
       int calibrationExit = CalibrationRunner.run(new String[] {"--calibrate", "--input", path(outputDirectory, "capture.csv"), "--encoders",
-            path(outputDirectory, "encoders.csv"), "--urdf", path(outputDirectory, "alex.urdf"), "--sigma", Double.toString(SIGMA), "--world-tilt", "0.08",
+            path(outputDirectory, "encoders.csv"), "--urdf", modelUrdf.toString(), "--sigma", Double.toString(SIGMA), "--world-tilt", "0.08",
             "--output", path(outputDirectory, "calibration.json"), "--note", "AlexLegDemo"}, System.out, System.err);
 
       if (calibrationExit != 0)
@@ -108,7 +138,7 @@ public class AlexLegDemo
                                                     "--encoders",
                                                     path(outputDirectory, "encoders.csv"),
                                                     "--urdf",
-                                                    path(outputDirectory, "alex.urdf"),
+                                                    modelUrdf.toString(),
                                                     "--calibration",
                                                     path(outputDirectory, "calibration.json"),
                                                     "--output-directory",
@@ -137,6 +167,23 @@ public class AlexLegDemo
       // ReplayRunner exits 1 when any frame was refused. On the degenerate run that is expected and
       // is the point being made, so do not dress it up as success either way.
       System.exit(replayExit);
+   }
+
+   /** The first candidate URDF that exists, if any. Its meshes resolve relative to its own folder. */
+   private static java.util.Optional<Path> urdfWithMeshes()
+   {
+      for (String candidate : URDF_WITH_MESHES_CANDIDATES)
+      {
+         if (candidate == null)
+            continue;
+
+         Path path = Path.of(candidate);
+
+         if (Files.isRegularFile(path))
+            return java.util.Optional.of(path.toAbsolutePath());
+      }
+
+      return java.util.Optional.empty();
    }
 
    private static void writeCaptureSession(Path directory, RobotCaptures.Planted planted) throws Exception

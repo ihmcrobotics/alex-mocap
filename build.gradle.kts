@@ -73,8 +73,18 @@ dependencies {
 tasks.test {
     useJUnitPlatform()
 
+    // AlexLegDemoTest prints its tables only under -Dalex.demo.verbose=true, so CI stays quiet.
+    // Gradle's Test task does NOT inherit the launching JVM's system properties, so without this
+    // forwarding the documented flag is accepted on the command line and silently does nothing --
+    // which reads as "the demo has no verbose output" rather than as a build gap.
+    val demoVerbose = providers.systemProperty("alex.demo.verbose").getOrElse("false")
+    systemProperty("alex.demo.verbose", demoVerbose)
+    inputs.property("alex.demo.verbose", demoVerbose)
+
     testLogging {
         events("failed")
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        // Only when asked: the demo tables are hundreds of lines.
+        showStandardStreams = demoVerbose.toBoolean()
     }
 }

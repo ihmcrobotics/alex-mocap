@@ -150,7 +150,12 @@ public class AlexLegDemo
                                                     "--velocity",
                                                     "--error-budget"));
       if (visualize)
+      {
          replay.add("--visualize");
+         System.out.println("The SCS2 window will open once the replay finishes, and this console will");
+         System.out.println("resume when you close it. Press play if the trajectory has already run through.");
+         System.out.println();
+      }
 
       int replayExit = ReplayRunner.run(replay.toArray(new String[0]), System.out, System.err);
 

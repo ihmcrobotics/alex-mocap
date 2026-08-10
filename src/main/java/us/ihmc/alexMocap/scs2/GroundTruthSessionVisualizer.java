@@ -15,7 +15,9 @@ import us.ihmc.scs2.definition.geometry.GeometryDefinition;
 import us.ihmc.scs2.definition.geometry.ModelFileGeometryDefinition;
 import us.ihmc.scs2.definition.robot.RobotDefinition;
 import us.ihmc.scs2.definition.robot.urdf.URDFTools;
+import us.ihmc.scs2.session.SessionMode;
 import us.ihmc.scs2.sessionVisualizer.jfx.SessionVisualizer;
+import us.ihmc.scs2.sessionVisualizer.jfx.SessionVisualizerControls;
 import us.ihmc.scs2.simulation.SimulationSession;
 import us.ihmc.scs2.simulation.physicsEngine.PhysicsEngineFactory;
 import us.ihmc.scs2.simulation.robot.Robot;
@@ -54,7 +56,8 @@ public class GroundTruthSessionVisualizer
    }
 
    /**
-    * Opens the visualizer and blocks until the window is closed.
+    * Opens the visualizer, plays the trajectory through once, and <b>blocks until the window is
+    * closed</b>.
     *
     * @param urdfFile            the robot to draw.
     * @param samples             the computed ground truth, in order.
@@ -95,10 +98,34 @@ public class GroundTruthSessionVisualizer
          variables.update(samples.get(index));
          setRobotConfiguration(robot, encoderSamples.get(index));
 
-         sampleIndex[0] = index + 1;
+         // Stop on the last sample instead of spinning on it forever. Without this the session
+         // keeps ticking, re-publishing the final capture, and the buffer fills with copies of one
+         // frame -- which looks like a frozen robot rather than a finished replay.
+         if (index >= samples.size() - 1)
+            session.setSessionMode(SessionMode.PAUSE);
+         else
+            sampleIndex[0] = index + 1;
       });
 
-      SessionVisualizer.startSessionVisualizer(session);
+      SessionVisualizerControls controls = SessionVisualizer.startSessionVisualizer(session);
+      controls.waitUntilVisualizerFullyUp();
+
+      // Room for the whole trajectory, so every capture stays scrubbable rather than scrolling out
+      // of a ring buffer sized for something else.
+      session.submitBufferSizeRequestAndWait(samples.size() + 1);
+
+      // Play it through once on open. The alternative is a window showing capture 0 and a play
+      // button, which makes a working replay look like a static screenshot.
+      session.setSessionMode(SessionMode.RUNNING);
+
+      // THE BLOCKING CALL, and the reason this method exists rather than being three lines inline.
+      //
+      // startSessionVisualizer returns as soon as the toolkit is up -- it does NOT wait for the
+      // window to close. Returning here would hand control back to a caller that then reaches the
+      // end of main and calls System.exit, killing the JVM and the window with it. The symptom is
+      // a console that prints its whole report and exits while the user is still waiting for a
+      // window to appear, which reads as "the visualizer silently does nothing".
+      controls.waitUntilVisualizerDown();
    }
 
    /**

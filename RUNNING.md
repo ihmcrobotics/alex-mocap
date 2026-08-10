@@ -303,11 +303,28 @@ Everything lands in `build/alex-demo/`: `calibration.json`, `com.csv`, `pelvis.c
 whole-body CoM, the pelvis coordinate system, and every conditioning variable available to
 plot.
 
-The robot is drawn **where the markers say it was** — suspended around `(1.0, 2.0, 1.4)` for
-this capture set, not at the origin — with the CoM sphere a few centimetres inside it. It hangs
-with its legs swinging ±0.45 rad (26°) about the straight-legged rest pose, which is what a
-gantry calibration physically looks like. Successive captures are independent draws, so the
-replay *steps* between poses rather than sweeping through them.
+You get three things overlaid:
+
+| what | how it is drawn |
+|---|---|
+| the robot at **truth** | solid, at the planted base pose |
+| the **mocap reconstruction** | translucent cyan **ghost** |
+| the 28 **markers** | spheres, coloured per cluster (yellow = pelvis gauge) |
+| the CoM | small gold sphere, inside the pelvis |
+
+On a healthy leg marker set the ghost sits on top of the solid robot — that *is* the result.
+Run `--degenerate` and it walks ~56 mm off along x: the same number the report prints, except
+you can see it.
+
+The robot hangs at `(0, 0, 1.4)`, directly above the origin triad, with its legs swinging
+±0.45 rad (26°) about the straight-legged rest pose and its feet kept at least 0.10 m apart so
+they do not cross. Successive captures are independent draws, so the replay *steps* between
+poses rather than sweeping through them.
+
+Note the **height** is deliberate. `RobotCaptures` itself still defaults to `(1.0, 2.0, 1.4)`,
+off-origin on purpose: code that quietly assumes the base is at identity gives exactly the right
+answer when it is, which is how the visualizer came to draw the robot at the origin for a whole
+PR unnoticed. Keeping `z = 1.4` in the demo means that fault would still be obvious here.
 
 **Why not the full URDF range.** FRAMEWORK.md §1 asks for as much joint excursion as the robot
 has, and that excursion is what makes `Δ` identifiable — but taken literally on Alex it is

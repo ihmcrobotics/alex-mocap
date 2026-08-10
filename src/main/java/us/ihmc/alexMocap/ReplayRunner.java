@@ -31,6 +31,7 @@ import us.ihmc.alexMocap.runtime.PelvisStateExtractor;
 import us.ihmc.alexMocap.scs2.ConditioningMonitor;
 import us.ihmc.alexMocap.scs2.GroundTruthSessionVisualizer;
 import us.ihmc.euclid.transform.RigidBodyTransform;
+import us.ihmc.euclid.transform.interfaces.RigidBodyTransformReadOnly;
 import us.ihmc.euclid.tuple3D.Point3D;
 import us.ihmc.euclid.tuple3D.Vector3D;
 
@@ -124,6 +125,10 @@ public class ReplayRunner
       List<GroundTruthSample> samples = new ArrayList<>();
       List<RigidBodyTransform> pelvisPoses = new ArrayList<>();
       List<EncoderSample> usedEncoders = new ArrayList<>();
+      // Hoisted out of the try so the visualizer, which runs after the source is closed, can see
+      // them. Null unless --visualize asked for the window.
+      List<MocapFrame> retainedFrames = null;
+      List<MarkerCluster> viewClusters = null;
       ConditioningMonitor monitor;
       long refusedFrames = 0;
 
@@ -158,6 +163,15 @@ public class ReplayRunner
          MeasuredLinkPoses poses = new MeasuredLinkPoses(linkNames);
          MocapFrame frame = source.createFrame();
          Point3D com = new Point3D();
+
+         // Kept only when the window is going to be opened. A replay of a long session holds one
+         // frame at a time on purpose; retaining every frame for a run that prints CSVs and exits
+         // would be pure memory for nothing.
+         if (arguments.visualize)
+         {
+            retainedFrames = new ArrayList<>();
+            viewClusters = clusters;
+         }
 
          while (!source.isFinished() && samples.size() < encoderSamples.size())
          {
@@ -194,6 +208,13 @@ public class ReplayRunner
                if (refusedFrames <= 5)
                   err.println("frame " + samples.size() + ": no CoM -- " + centerOfMass.getMissingLinkCount() + " link(s) missing, "
                         + String.format("%.3f kg", centerOfMass.getMissingMass()) + " unmeasured. First reason: " + firstRefusal(poses));
+            }
+
+            if (retainedFrames != null)
+            {
+               MocapFrame copy = source.createFrame();
+               copy.set(frame);
+               retainedFrames.add(copy);
             }
 
             monitor.accumulate(sample);
@@ -246,11 +267,65 @@ public class ReplayRunner
                                             arguments.meshDirectories,
                                             samples,
                                             usedEncoders,
+                                            retainedFrames,
+                                            viewClusters,
+                                            readTruthBasePoses(arguments.truthBase, samples.size(), err),
                                             world.getGravityAlignedWorld(),
                                             arguments.sampleRateHz);
       }
 
       return refusedFrames == 0 ? EXIT_OK : EXIT_REFUSALS;
+   }
+
+   /**
+    * Reads planted base poses for the ghost overlay: {@code timestamp,x,y,z,qx,qy,qz,qs} per line.
+    * <p>
+    * A missing file is not an error -- most replays have no truth -- and neither is a count that
+    * does not match: the ghost is a convenience, and refusing to open the window because a debug
+    * CSV is stale would be a poor trade. Both are reported, and the ghost is simply dropped.
+    * </p>
+    */
+   private static List<RigidBodyTransformReadOnly> readTruthBasePoses(Path file, int expected, PrintStream err)
+   {
+      if (file == null)
+         return null;
+
+      try
+      {
+         List<RigidBodyTransformReadOnly> poses = new ArrayList<>();
+
+         for (String line : Files.readAllLines(file, StandardCharsets.UTF_8))
+         {
+            if (line.isBlank() || line.startsWith("#") || line.startsWith("timestamp"))
+               continue;
+
+            String[] columns = line.split(",");
+
+            if (columns.length < 8)
+               throw new IOException("expected 8 columns, got " + columns.length + ": " + line);
+
+            RigidBodyTransform pose = new RigidBodyTransform();
+            pose.getTranslation().set(Double.parseDouble(columns[1]), Double.parseDouble(columns[2]), Double.parseDouble(columns[3]));
+            pose.getRotation().setQuaternion(Double.parseDouble(columns[4]),
+                                             Double.parseDouble(columns[5]),
+                                             Double.parseDouble(columns[6]),
+                                             Double.parseDouble(columns[7]));
+            poses.add(pose);
+         }
+
+         if (poses.size() != expected)
+         {
+            err.println("note: " + file + " holds " + poses.size() + " base poses for " + expected + " frames; drawing no ghost.");
+            return null;
+         }
+
+         return poses;
+      }
+      catch (IOException | NumberFormatException e)
+      {
+         err.println("note: could not read " + file + " (" + e.getMessage() + "); drawing no ghost.");
+         return null;
+      }
    }
 
    private static us.ihmc.alexMocap.postprocess.ErrorBudgetReport errorBudget(RobotModelHandle model, List<GroundTruthSample> samples, Arguments arguments)
@@ -407,6 +482,8 @@ public class ReplayRunner
               --mass-uncertainty <f>    per-link mass uncertainty for the budget. Default 0.05.
               --com-uncertainty <m>     per-axis link-CoM uncertainty. Default 0.005.
               --visualize               open the SCS2 visualizer afterwards. Needs a display.
+              --truth-base <file>       planted base poses (CSV). Draws a translucent ghost at the
+                                        reconstructed pose beside the solid robot at truth.
               --mesh-dir <dir>          root for package:// mesh lookups. Repeatable, searched in
                                         order. Defaults to the URDF's own directory. Alex's meshes
                                         are in ihmc-alex-sdk/alex-models/, not beside the URDF.
@@ -446,6 +523,12 @@ public class ReplayRunner
        */
       final List<String> meshDirectories = new ArrayList<>();
 
+      /**
+       * Planted base poses, for the ghost overlay. Only a synthetic session has these; a replay of
+       * real captures has no truth to draw, and then there is simply no ghost.
+       */
+      Path truthBase;
+
       static Arguments parse(String[] args)
       {
          Arguments arguments = new Arguments();
@@ -476,6 +559,7 @@ public class ReplayRunner
                case "--com-uncertainty" -> arguments.comUncertainty = Double.parseDouble(value(args, ++i, "--com-uncertainty"));
                case "--visualize" -> arguments.visualize = true;
                case "--mesh-dir" -> arguments.meshDirectories.add(value(args, ++i, "--mesh-dir"));
+               case "--truth-base" -> arguments.truthBase = Path.of(value(args, ++i, "--truth-base"));
                default -> throw new IllegalArgumentException("unknown option '" + args[i] + "'");
             }
          }

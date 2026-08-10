@@ -9,6 +9,8 @@ import java.util.List;
 
 import us.ihmc.alexMocap.core.EncoderSample;
 import us.ihmc.alexMocap.core.GroundTruthSample;
+import us.ihmc.alexMocap.core.MarkerCluster;
+import us.ihmc.alexMocap.core.MocapFrame;
 import us.ihmc.euclid.referenceFrame.ReferenceFrame;
 import us.ihmc.euclid.transform.interfaces.RigidBodyTransformReadOnly;
 import us.ihmc.mecano.multiBodySystem.interfaces.FloatingJointBasics;
@@ -16,8 +18,12 @@ import us.ihmc.mecano.multiBodySystem.interfaces.JointBasics;
 import us.ihmc.mecano.multiBodySystem.interfaces.OneDoFJointBasics;
 import us.ihmc.scs2.definition.geometry.GeometryDefinition;
 import us.ihmc.scs2.definition.geometry.ModelFileGeometryDefinition;
+import us.ihmc.scs2.definition.robot.RigidBodyDefinition;
 import us.ihmc.scs2.definition.robot.RobotDefinition;
 import us.ihmc.scs2.definition.robot.urdf.URDFTools;
+import us.ihmc.scs2.definition.visual.ColorDefinition;
+import us.ihmc.scs2.definition.visual.MaterialDefinition;
+import us.ihmc.scs2.definition.visual.VisualDefinition;
 import us.ihmc.scs2.session.SessionMode;
 import us.ihmc.scs2.sessionVisualizer.jfx.SessionVisualizer;
 import us.ihmc.scs2.sessionVisualizer.jfx.SessionVisualizerControls;
@@ -54,8 +60,39 @@ import us.ihmc.scs2.simulation.robot.Robot;
  */
 public class GroundTruthSessionVisualizer
 {
+   /**
+    * The ghost's colour: pale cyan at 35 % opacity.
+    * <p>
+    * Cyan rather than a grey because the solid robot is already grey, and a translucent grey ghost
+    * reads as a rendering artefact rather than as a second robot. 35 % is low enough to see the
+    * solid robot through it and high enough to see the ghost against the sky.
+    * </p>
+    */
+   private static final ColorDefinition GHOST_COLOR = new ColorDefinition(0.35, 0.85, 0.95, 0.35);
+
    private GroundTruthSessionVisualizer()
    {
+   }
+
+   /**
+    * Repaints every visual on a robot in one translucent colour.
+    * <p>
+    * Materials are replaced rather than modified in place: a URDF visual may share a
+    * {@code MaterialDefinition} instance between links, and mutating one would silently repaint the
+    * solid robot too -- the two definitions are loaded separately but from the same file.
+    * </p>
+    */
+   private static void makeTranslucent(RobotDefinition robotDefinition, ColorDefinition color)
+   {
+      for (RigidBodyDefinition body : robotDefinition.getAllRigidBodies())
+      {
+         for (VisualDefinition visual : body.getVisualDefinitions())
+         {
+            MaterialDefinition material = new MaterialDefinition(color);
+            material.setDiffuseColor(color);
+            visual.setMaterialDefinition(material);
+         }
+      }
    }
 
    /**
@@ -112,10 +149,52 @@ public class GroundTruthSessionVisualizer
                            double sampleRateHz)
          throws IOException
    {
+      show(urdfFile, resourceDirectories, samples, encoderSamples, null, null, null, gravityAlignedWorld, sampleRateHz);
+   }
+
+   /**
+    * The full view: the robot, the marker cloud it is measured by, and a ghost at the reconstructed
+    * pose.
+    *
+    * <h2>Solid is truth, ghost is what mocap recovered</h2>
+    * <p>
+    * When {@code truthBasePoses} is supplied the solid robot is drawn at the <b>planted</b> base
+    * pose and the translucent ghost at the <b>measured</b> one, so the separation between them is
+    * the pipeline's pelvis error, to scale, in the same picture as the markers that produced it.
+    * On a healthy leg marker set they sit on top of each other -- which is the result. Run
+    * {@code AlexLegDemo --degenerate} and the ghost walks 56 mm off along x, which is the same
+    * number the report prints, except that you can see it.
+    * </p>
+    * <p>
+    * Without {@code truthBasePoses} there is no ghost and the single robot is drawn at the measured
+    * pose, as before. A replay of real captures has no truth to draw.
+    * </p>
+    *
+    * @param frames         one per sample, for the marker cloud. Null draws no markers.
+    * @param clusters       the marker clusters, for colouring. Required when {@code frames} is given.
+    * @param truthBasePoses one per sample, {@code ^Wg T_b} as planted. Null draws no ghost.
+    */
+   public static void show(Path urdfFile,
+                           List<String> resourceDirectories,
+                           List<GroundTruthSample> samples,
+                           List<EncoderSample> encoderSamples,
+                           List<MocapFrame> frames,
+                           List<MarkerCluster> clusters,
+                           List<RigidBodyTransformReadOnly> truthBasePoses,
+                           ReferenceFrame gravityAlignedWorld,
+                           double sampleRateHz)
+         throws IOException
+   {
       if (samples.isEmpty())
          throw new IllegalArgumentException("Nothing to show: the trajectory is empty.");
       if (samples.size() != encoderSamples.size())
          throw new IllegalArgumentException("Got " + samples.size() + " ground truth samples and " + encoderSamples.size() + " encoder samples.");
+      if (frames != null && frames.size() != samples.size())
+         throw new IllegalArgumentException("Got " + frames.size() + " mocap frames for " + samples.size() + " samples.");
+      if (frames != null && clusters == null)
+         throw new IllegalArgumentException("Marker frames were supplied without their clusters, so the markers cannot be grouped or coloured.");
+      if (truthBasePoses != null && truthBasePoses.size() != samples.size())
+         throw new IllegalArgumentException("Got " + truthBasePoses.size() + " truth base poses for " + samples.size() + " samples.");
 
       RobotDefinition robotDefinition = loadRobotDefinition(urdfFile, resourceDirectories);
       dropUnrepresentableGeometry(robotDefinition, urdfFile);
@@ -126,18 +205,60 @@ public class GroundTruthSessionVisualizer
       Robot robot = session.addRobot(robotDefinition);
       JointBasics floatingJoint = findFloatingJoint(robot);
 
+      // The ghost needs its own definition: addRobot consumes the one it is given, and the two
+      // robots must differ in material anyway.
+      Robot ghost = null;
+      JointBasics ghostFloatingJoint = null;
+
+      if (truthBasePoses != null)
+      {
+         RobotDefinition ghostDefinition = loadRobotDefinition(urdfFile, resourceDirectories);
+         dropUnrepresentableGeometry(ghostDefinition, urdfFile);
+         ghostDefinition.setName(ghostDefinition.getName() + "Ghost");
+         makeTranslucent(ghostDefinition, GHOST_COLOR);
+         ghost = session.addRobot(ghostDefinition);
+         ghostFloatingJoint = findFloatingJoint(ghost);
+      }
+
       GroundTruthYoVariables variables = new GroundTruthYoVariables("gt", samples.get(0).getLinkNames(), gravityAlignedWorld);
       session.getRootRegistry().addChild(variables.getRegistry());
       session.addYoGraphicDefinition(GroundTruthYoGraphics.create("groundTruth", variables));
 
+      MocapMarkerYoVariables markerVariables = null;
+
+      if (frames != null)
+      {
+         // The cloud is in the motive world: markers are raw observations and F8's tilt correction
+         // is applied downstream of them. Drawing them in Wg would float the cloud off the robot.
+         markerVariables = new MocapMarkerYoVariables("gt", clusters, frames.get(0).getMarkers(), ReferenceFrame.getWorldFrame());
+         session.getRootRegistry().addChild(markerVariables.getRegistry());
+         session.addYoGraphicDefinition(markerVariables.createYoGraphics("mocapMarkers"));
+      }
+
       int[] sampleIndex = {0};
+      Robot finalGhost = ghost;
+      JointBasics finalGhostJoint = ghostFloatingJoint;
+      MocapMarkerYoVariables finalMarkers = markerVariables;
 
       session.addBeforePhysicsCallback(time ->
       {
          int index = Math.min(sampleIndex[0], samples.size() - 1);
 
          variables.update(samples.get(index));
-         setRobotConfiguration(robot, floatingJoint, encoderSamples.get(index), samples.get(index).getPelvisPose());
+
+         if (finalMarkers != null)
+            finalMarkers.update(frames.get(index));
+
+         if (finalGhost != null)
+         {
+            // Solid robot at truth, ghost at the reconstruction.
+            setRobotConfiguration(robot, floatingJoint, encoderSamples.get(index), truthBasePoses.get(index));
+            setRobotConfiguration(finalGhost, finalGhostJoint, encoderSamples.get(index), samples.get(index).getPelvisPose());
+         }
+         else
+         {
+            setRobotConfiguration(robot, floatingJoint, encoderSamples.get(index), samples.get(index).getPelvisPose());
+         }
 
          // Stop on the last sample instead of spinning on it forever. Without this the session
          // keeps ticking, re-publishing the final capture, and the buffer fills with copies of one

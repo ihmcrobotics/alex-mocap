@@ -128,6 +128,91 @@ public class CapturePostureTest
                        + " m the sampler changed, and the default sweep may no longer be buying anything.");
    }
 
+   /**
+    * The legs do not cross.
+    * <p>
+    * A sweep about the rest pose keeps the feet <i>below</i> the robot but says nothing about left
+    * versus right: ±0.45 rad of hip roll on a 0.89 m leg is ±0.39 m of lateral travel against a
+    * 0.24 m rest stance, so the ankles pass through each other regularly without the constraint.
+    * </p>
+    */
+   @Test
+   public void testUncrossedLegsConstraintIsHonoured() throws Exception
+   {
+      double minimumSeparation = 0.10;
+
+      RobotCaptures.Planted planted = RobotCaptures.generate(new RobotCaptures.Options().captures(60)
+                                                                                         .noise(0.0)
+                                                                                         .sweepAboutRest(SWEEP)
+                                                                                         .uncrossedLegs(minimumSeparation));
+
+      RobotModelHandle model = RobotCaptures.alexModel();
+      RigidBodyTransform left = new RigidBodyTransform();
+      RigidBodyTransform right = new RigidBodyTransform();
+
+      for (double[] q : planted.reportedJointAngles)
+      {
+         model.setQ(q);
+         model.updateFrames();
+         model.packLinkToBase("LEFT_FOOT", left);
+         model.packLinkToBase("RIGHT_FOOT", right);
+
+         double separation = left.getTranslationY() - right.getTranslationY();
+
+         assertTrue(separation >= minimumSeparation,
+                    "Feet were " + separation + " m apart (left minus right, base frame); the legs crossed or came closer than "
+                          + minimumSeparation + " m.");
+      }
+
+      assertTrue(planted.crossedLegResampleCount > 0,
+                 "No draw was rejected, so the constraint is not actually binding at this sweep -- either the sweep shrank or the "
+                       + "rejection is not wired in.");
+   }
+
+   /** Without the constraint the legs really do cross, which is what makes the test above matter. */
+   @Test
+   public void testLegsCrossWithoutTheConstraint() throws Exception
+   {
+      RobotCaptures.Planted planted = RobotCaptures.generate(new RobotCaptures.Options().captures(60).noise(0.0).sweepAboutRest(SWEEP));
+
+      RobotModelHandle model = RobotCaptures.alexModel();
+      RigidBodyTransform left = new RigidBodyTransform();
+      RigidBodyTransform right = new RigidBodyTransform();
+      double worst = Double.POSITIVE_INFINITY;
+
+      for (double[] q : planted.reportedJointAngles)
+      {
+         model.setQ(q);
+         model.updateFrames();
+         model.packLinkToBase("LEFT_FOOT", left);
+         model.packLinkToBase("RIGHT_FOOT", right);
+         worst = Math.min(worst, left.getTranslationY() - right.getTranslationY());
+      }
+
+      assertTrue(worst < 0.10, "Closest foot separation was " + worst + " m without the constraint; it used to cross, so if this now "
+            + "passes cleanly the sweep changed and uncrossedLegs() may no longer be needed.");
+   }
+
+   /** The nominal hanging position is settable, and the demonstration hangs above the origin. */
+   @Test
+   public void testBasePositionIsSettable() throws Exception
+   {
+      RobotCaptures.Planted planted = RobotCaptures.generate(new RobotCaptures.Options().captures(8)
+                                                                                         .noise(0.0)
+                                                                                         .sweepAboutRest(SWEEP)
+                                                                                         .basePosition(0.0, 0.0, 1.4));
+
+      for (RigidBodyTransform basePose : planted.basePoses)
+      {
+         assertTrue(Math.hypot(basePose.getTranslationX(), basePose.getTranslationY()) < 0.05,
+                    "Base sits at " + basePose.getTranslation() + ", not above the origin.");
+
+         // The gantry height is kept on purpose: a robot mistakenly drawn at identity would sit at
+         // z = 0, so the placement fault stays visible even in a view centred on the origin.
+         assertTrue(basePose.getTranslationZ() > 1.3, "Base height was " + basePose.getTranslationZ() + " m; it should still hang.");
+      }
+   }
+
    /** A one-sided joint gets a one-sided sweep rather than a window shifted past its stop. */
    @Test
    public void testKneeSweepStaysOnTheBendingSide() throws Exception

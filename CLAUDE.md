@@ -230,6 +230,31 @@ narrowed every sweep would otherwise leave the property test passing and proving
 **The meshes do render** — confirmed visually on a machine with a display, which closes the item
 that could not be settled headlessly.
 
+### The replay shows markers and a ghost now, not just numbers (PR5)
+
+The visualizer drew a CoM sphere and a pelvis triad and nothing else, which made a mocap
+demonstration in which you could not see the mocap. It now takes three optional extras:
+
+- **the marker cloud** — 28 spheres, coloured per cluster, NaN when unseen so a dropout vanishes;
+- **a translucent ghost** at the reconstructed pose, with the solid robot at planted truth;
+- both fed through `ReplayRunner --truth-base <csv>` and the retained `MocapFrame`s.
+
+The ghost is the payoff on `--degenerate`: the hip-X-only set is 57 mm wrong, and instead of that
+being a number in a report the ghost visibly walks off along x. On a healthy set the two robots
+coincide, which is the result stated as a picture.
+
+Frames are retained **only** when `--visualize` is set — a replay of a long session deliberately
+holds one frame at a time, and keeping every frame for a run that prints CSVs and exits is memory
+for nothing. Truth is optional everywhere: a replay of real captures has no truth to draw, and a
+stale or short CSV drops the ghost with a note rather than refusing to open the window.
+
+Two geometry fixes went with it. **Legs no longer cross** — ±0.45 rad of hip roll on a 0.89 m leg
+is ±0.39 m of lateral travel against a 0.24 m rest stance, so the ankles passed through each other
+routinely; `Options.uncrossedLegs(m)` rejects and redraws, because crossing is a property of the two
+legs *together* and no per-joint bound expresses it without discarding most of the envelope. And the
+demo now hangs the robot at `(0, 0, 1.4)` rather than `RobotCaptures`' off-origin default, keeping
+the gantry height so a robot mistakenly drawn at identity would still be obvious.
+
 ### The failure mode this project has
 
 **Every bug found here was a small residual with a wrong answer, never a loud one.** The gauge

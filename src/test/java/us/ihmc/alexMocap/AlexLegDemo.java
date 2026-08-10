@@ -10,6 +10,8 @@ import us.ihmc.alexMocap.calibration.RobotCaptures;
 import us.ihmc.alexMocap.core.CsvEncoderLog;
 import us.ihmc.alexMocap.core.EncoderSample;
 import us.ihmc.alexMocap.mocap.MocapFrameRecorder;
+import us.ihmc.euclid.transform.RigidBodyTransform;
+import us.ihmc.euclid.tuple4D.Quaternion;
 
 /**
  * <b>Run this one file to see the whole thing, ending in the SCS2 window.</b>
@@ -22,20 +24,25 @@ import us.ihmc.alexMocap.mocap.MocapFrameRecorder;
  * AlexLegDemo                       generate, calibrate, replay, then open SCS2
  * AlexLegDemo --no-visualize        the same without the window (works headless / over SSH)
  * AlexLegDemo --degenerate          the hip-X-only marker set: a perfect-looking, 57 mm-wrong fit
- * AlexLegDemo --excursion 0.3       narrow the joint sweep -- easier to look at, worse conditioned
+ * AlexLegDemo --sweep 0.6           wider leg swing about the rest pose (radians, half-range)
+ * AlexLegDemo --full-range          every joint across its whole URDF range, as §1 literally asks
  * AlexLegDemo --out /some/dir       write somewhere other than build/alex-demo
  * </pre>
  *
  * <h2>What it looks like, and why</h2>
  * <p>
  * The robot is drawn <b>where the markers say it was</b> -- suspended around
- * {@code (1.0, 2.0, 1.4)} for this capture set, not at the origin -- with the gold CoM sphere a few
- * centimetres inside it. Its legs move through postures no walking robot would adopt, because a
- * calibration capture session is not a walk: FRAMEWORK.md §1 asks for as much joint excursion as the
- * robot has, and that excursion is precisely what makes {@code Δ} and the layouts identifiable.
- * Successive captures are independent draws, so the replay steps between poses rather than sweeping
- * smoothly through them. {@code --excursion} narrows it if you are looking at the geometry rather
- * than at the calibration; it makes the fit worse, which is the point of leaving it at 1.0.
+ * {@code (1.0, 2.0, 1.4)} for this capture set, not at the origin -- hanging from a gantry with its
+ * legs swinging ±0.45 rad about the straight-legged rest pose, feet uncrossed. Around it are the 28
+ * marker spheres it is being measured by, and a translucent <b>ghost</b> at the pose the mocap
+ * pipeline reconstructs. Successive captures are independent draws, so the replay steps between
+ * poses rather than sweeping smoothly through them.
+ * </p>
+ * <p>
+ * {@code --full-range} restores what FRAMEWORK.md §1 literally asks for -- every joint uniform
+ * across its whole URDF limit. It conditions the fit slightly better (in-sample RMS 1.910 mm against
+ * 1.987 mm) and looks absurd: {@code HIP_Y} spans {@code [-150°, +45°]}, so it folds one thigh
+ * against the chest while the other kicks forward.
  * </p>
  *
  * <h2>Why this lives in test scope</h2>
@@ -83,6 +90,25 @@ public class AlexLegDemo
     */
    private static final double DEFAULT_SWEEP_HALF_RANGE = 0.45;
 
+   /**
+    * Feet must stay at least this far apart laterally, metres.
+    * <p>
+    * The rest stance is 0.240 m, so this keeps a visible gap without pinning the legs to it. Below
+    * about 0.05 m the ankles visibly interpenetrate; above about 0.15 m the rejection starts
+    * throwing away most of the sweep.
+    * </p>
+    */
+   private static final double MINIMUM_FOOT_SEPARATION = 0.10;
+
+   /**
+    * How high the suspended pelvis hangs, metres.
+    * <p>
+    * The feet sit about 0.89 m below the pelvis at rest, so this clears the floor by roughly half a
+    * metre -- a robot on a gantry, not one standing on the ground.
+    * </p>
+    */
+   private static final double GANTRY_HEIGHT = 1.4;
+
    public static void main(String[] args) throws Exception
    {
       boolean visualize = !List.of(args).contains("--no-visualize");
@@ -121,8 +147,14 @@ public class AlexLegDemo
                                                                  .noise(SIGMA)
                                                                  .randomize(RobotCaptures.LEG_JOINTS)
                                                                  .marked(markedLinks);
+      // Hang the robot directly above the origin triad rather than at RobotCaptures' default
+      // (1.0, 2.0, 1.4), which puts it off in the corner of the view. The gantry HEIGHT is kept:
+      // a robot mistakenly drawn at identity would sit at z = 0, so the placement fault this demo
+      // exposed once already would still be obvious here.
+      options.basePosition(0.0, 0.0, GANTRY_HEIGHT);
+
       if (!fullRange)
-         options.sweepAboutRest(sweep);
+         options.sweepAboutRest(sweep).uncrossedLegs(MINIMUM_FOOT_SEPARATION);
       if (degenerate)
          options.noise(0.0);
 
@@ -180,6 +212,8 @@ public class AlexLegDemo
       if (visualize)
       {
          replay.add("--visualize");
+         replay.add("--truth-base");
+         replay.add(path(outputDirectory, "truthBase.csv"));
 
          for (String meshDirectory : meshDirectories)
          {
@@ -225,6 +259,30 @@ public class AlexLegDemo
 
       CsvEncoderLog.write(directory.resolve("encoders.csv"), encoders);
       Files.copy(RobotCaptures.alexUrdfPath(), directory.resolve("alex.urdf"), StandardCopyOption.REPLACE_EXISTING);
+
+      // The planted base poses, for the ghost overlay. This is TRUTH, and it exists only because
+      // the session is synthetic -- ReplayRunner treats it as optional debug input and draws no
+      // ghost without it, because a replay of real captures has nothing to put here.
+      List<String> lines = new ArrayList<>();
+      lines.add("# alex-mocap planted base poses ^Wg T_b -- TRUTH, synthetic sessions only");
+      lines.add("timestamp_ns,x,y,z,qx,qy,qz,qs");
+
+      for (int k = 0; k < planted.basePoses.length; k++)
+      {
+         RigidBodyTransform pose = planted.basePoses[k];
+         Quaternion q = new Quaternion(pose.getRotation());
+         lines.add(String.format("%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g",
+                                 planted.captureSet.getCapture(k).getMocapFrame().getTimestampNanoseconds(),
+                                 pose.getTranslationX(),
+                                 pose.getTranslationY(),
+                                 pose.getTranslationZ(),
+                                 q.getX(),
+                                 q.getY(),
+                                 q.getZ(),
+                                 q.getS()));
+      }
+
+      Files.write(directory.resolve("truthBase.csv"), lines);
    }
 
    private static String path(Path directory, String name)

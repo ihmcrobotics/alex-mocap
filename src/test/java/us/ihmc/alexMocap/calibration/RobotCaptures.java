@@ -191,6 +191,50 @@ public class RobotCaptures
        */
       public double sweepHalfRangeRadians = Double.NaN;
 
+      /**
+       * If finite, reject any draw whose feet are laterally closer than this, metres. NaN (the
+       * default) accepts every draw.
+       * <p>
+       * A sweep about the rest pose keeps the feet <i>below</i> the robot but says nothing about
+       * left versus right. On Alex, ±0.45 rad of hip roll on a 0.89 m leg is ±0.39 m of lateral
+       * travel against a rest stance of 0.24 m, so the ankles pass through each other regularly.
+       * Legal, well conditioned, and it looks like a fault.
+       * </p>
+       * <p>
+       * Rejection rather than tighter hip limits because crossing is a property of the two legs
+       * <b>together</b>: a hip roll that is fine alone crosses once the other hip rolls the other
+       * way, and no per-joint bound expresses that without discarding most of the envelope. The
+       * cost is a mild bias -- draws near the crossing boundary are removed, so the sampled
+       * distribution is no longer exactly uniform over the box. {@code crossedLegResampleCount}
+       * reports how much was thrown away.
+       * </p>
+       */
+      public double minimumFootSeparation = Double.NaN;
+
+      /** Feet whose lateral separation {@link #minimumFootSeparation} constrains. */
+      public String leftFootLink = "LEFT_FOOT";
+      public String rightFootLink = "RIGHT_FOOT";
+
+      /**
+       * Where the suspended robot nominally hangs, metres, in the motive world.
+       * <p>
+       * The default is deliberately <b>not</b> the origin. Every {@code ^W T_i} in the pipeline is a
+       * full pose, and code that quietly assumes the base is at identity produces exactly the right
+       * answer when it is -- which is how the visualizer came to draw the robot at the origin for a
+       * whole PR without anybody noticing. Keeping the generator off-origin means a test that gets
+       * the base pose wrong reports a metre of error rather than none.
+       * </p>
+       * <p>
+       * A caller that wants the robot in front of the camera can move it; {@code AlexLegDemo} sets
+       * {@code (0, 0, 1.4)} so the robot hangs directly above the origin triad. Note it keeps the
+       * <b>height</b>: a robot drawn at identity would sit at {@code z = 0}, so the placement bug
+       * would still be visible even in that view.
+       * </p>
+       */
+      public double baseNominalX = 1.0;
+      public double baseNominalY = 2.0;
+      public double baseNominalZ = 1.4;
+
       /** Base pose wander between captures: a suspended robot is not perfectly still. */
       public double basePositionWander = 0.02;
       public double baseOrientationWander = Math.toRadians(2.0);
@@ -263,6 +307,22 @@ public class RobotCaptures
          return this;
       }
 
+      /** @see #minimumFootSeparation */
+      public Options uncrossedLegs(double minimumFootSeparationMetres)
+      {
+         this.minimumFootSeparation = minimumFootSeparationMetres;
+         return this;
+      }
+
+      /** @see #baseNominalX */
+      public Options basePosition(double x, double y, double z)
+      {
+         this.baseNominalX = x;
+         this.baseNominalY = y;
+         this.baseNominalZ = z;
+         return this;
+      }
+
       public Options gaugeSpread(double metres)
       {
          this.gaugeClusterSpread = metres;
@@ -315,6 +375,15 @@ public class RobotCaptures
       /** How many constellations were redrawn for near-collinearity. */
       public int collinearResampleCount;
 
+      /**
+       * How many joint draws were thrown away for crossing the legs.
+       * <p>
+       * Worth reporting rather than hiding: a large count means the rejection is doing most of the
+       * sampling, and the accepted set is correspondingly less uniform than it looks.
+       * </p>
+       */
+      public int crossedLegResampleCount;
+
       public ClusterLayout plantedLayout(String linkName)
       {
          for (ClusterLayout layout : layouts)
@@ -325,6 +394,27 @@ public class RobotCaptures
 
          throw new IllegalArgumentException("No planted layout for '" + linkName + "'.");
       }
+   }
+
+   /**
+    * Lateral distance between the two feet at a candidate configuration, metres, in the base frame.
+    * <p>
+    * Measured in the base frame rather than the world so it is independent of where the robot is
+    * standing and of its yaw. Mutates the model's configuration, which is safe here: the caller
+    * overwrites it with the accepted draw immediately afterwards.
+    * </p>
+    */
+   private static double footSeparation(RobotModelHandle model, Options options, double[] q)
+   {
+      model.setQ(q);
+      model.updateFrames();
+
+      RigidBodyTransform left = new RigidBodyTransform();
+      RigidBodyTransform right = new RigidBodyTransform();
+      model.packLinkToBase(options.leftFootLink, left);
+      model.packLinkToBase(options.rightFootLink, right);
+
+      return left.getTranslationY() - right.getTranslationY();
    }
 
    public static Planted generate(Options options) throws Exception
@@ -475,9 +565,9 @@ public class RobotCaptures
       for (int k = 0; k < options.captureCount; k++)
       {
          RigidBodyTransform basePose = new RigidBodyTransform();
-         basePose.getTranslation().set(1.0 + options.basePositionWander * (random.nextDouble() - 0.5),
-                                       2.0 + options.basePositionWander * (random.nextDouble() - 0.5),
-                                       1.4 + options.basePositionWander * (random.nextDouble() - 0.5));
+         basePose.getTranslation().set(options.baseNominalX + options.basePositionWander * (random.nextDouble() - 0.5),
+                                       options.baseNominalY + options.basePositionWander * (random.nextDouble() - 0.5),
+                                       options.baseNominalZ + options.basePositionWander * (random.nextDouble() - 0.5));
          basePose.getRotation().setYawPitchRoll(options.baseOrientationWander * (random.nextDouble() - 0.5),
                                                 options.baseOrientationWander * (random.nextDouble() - 0.5),
                                                 options.baseOrientationWander * (random.nextDouble() - 0.5));
@@ -485,12 +575,33 @@ public class RobotCaptures
 
          double[] reported = new double[model.getJointCount()];
 
-         for (int j = 0; j < model.getJointCount(); j++)
+         // Redraw until the legs are not crossed, when asked. A sweep about the rest pose keeps the
+         // feet below the robot but says nothing about left-versus-right: ±0.45 rad of hip roll on
+         // a 0.89 m leg is ±0.39 m of lateral travel against a rest stance of only 0.24 m, so the
+         // ankles pass each other regularly. It is a legal configuration and a well conditioned
+         // one; it just does not look like anything an operator would set up.
+         //
+         // Rejection rather than narrower hip limits, because crossing is a property of the two legs
+         // together -- a hip roll that is fine on its own crosses once the other hip rolls the other
+         // way, and no per-joint bound expresses that without throwing away most of the envelope.
+         for (int attempt = 0;; attempt++)
          {
-            if (randomized.contains(model.getJointNames().get(j)))
-               reported[j] = sampleLower[j] + random.nextDouble() * (sampleUpper[j] - sampleLower[j]);
-            else
-               reported[j] = held[j];
+            for (int j = 0; j < model.getJointCount(); j++)
+            {
+               if (randomized.contains(model.getJointNames().get(j)))
+                  reported[j] = sampleLower[j] + random.nextDouble() * (sampleUpper[j] - sampleLower[j]);
+               else
+                  reported[j] = held[j];
+            }
+
+            if (!Double.isFinite(options.minimumFootSeparation) || footSeparation(model, options, reported) >= options.minimumFootSeparation)
+               break;
+
+            planted.crossedLegResampleCount++;
+
+            if (attempt > 500)
+               throw new IllegalStateException("Could not draw an uncrossed leg configuration in 500 attempts at a foot separation of "
+                     + options.minimumFootSeparation + " m. Either the separation is larger than the rest stance or the sweep is very wide.");
          }
 
          planted.reportedJointAngles[k] = reported.clone();

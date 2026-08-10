@@ -218,6 +218,38 @@ conclusion outright — the CAD terms are 17× the mocap term, so perfect mocap 
 
 ## Demonstration: the real Alex model
 
+### Run it — one file, from IntelliJ
+
+Open `src/test/java/us/ihmc/alexMocap/AlexLegDemo.java` and hit the green arrow on `main`.
+That is the whole thing: it invents a leg-only marker session on the real Alex model, writes
+it out as CSV, calibrates it, replays it, and **opens SCS2**.
+
+```
+AlexLegDemo                    generate -> calibrate -> replay -> open the SCS2 window
+AlexLegDemo --no-visualize     the same without the window (headless / over SSH)
+AlexLegDemo --degenerate       the hip-X-only set: a perfect-looking, 57 mm-wrong fit
+AlexLegDemo --out /some/dir    write somewhere other than build/alex-demo
+```
+
+Everything lands in `build/alex-demo/`: `calibration.json`, `com.csv`, `pelvis.csv`,
+`pelvisVelocity.csv`, `conditioning.csv`.
+
+**In the SCS2 window** you get Alex at each logged configuration, a gold sphere at the
+whole-body CoM, the pelvis coordinate system, and every conditioning variable available to
+plot. It **replays** rather than simulates — the session is built with
+`newDoNothingPhysicsEngineFactory()`, so nothing integrates the robot forward and overwrites
+the poses being inspected. Press play; the timeline is the capture index.
+
+To plot the numbers that matter, open the YoVariable search and add `gtCom*`,
+`gt*Sigma3SquaredMetres` and `gt*VisibleMarkers`.
+
+Two notes. The demo lives in **test** scope because it depends on `RobotCaptures`, which
+invents mocap data — that has no business on the shipping classpath. And nothing here touches
+a camera: marker positions come from forward kinematics plus Gaussian noise, so this shows
+that the code recovers an answer it was given, not that Alex's real geometry is good enough.
+
+### What it demonstrates
+
 Everything above is measured on the toy 6-DOF URDF, and every accuracy claim there carries
 the caveat *"this tests the solver, not the robot"*. `AlexLegDemoTest` and
 `AlexLegDemoCliTest` (PR4) point the same shipping classes at the URDF the Python InEKF uses

@@ -22,8 +22,20 @@ tasks.named<JavaExec>("run") {
     isIgnoreExitValue = true
 }
 
+// Maven coordinates, not decoration. The SCS2 mocap ground-truth track lives in the `alex`
+// repository and consumes this project through Gradle composite-build substitution
+// (`includeBuild`), which matches an included build to a dependency by group:name. Without a
+// group this project is unaddressable and the substitution silently does not happen -- Gradle
+// then goes looking for `alex-mocap` in a remote repository and fails with "not found", which
+// reads as a missing artifact rather than as a missing `group`.
+group = "us.ihmc"
+version = "0.1.0"
+
 repositories {
     mavenCentral()
+    // mecano 17-0.19.3 and scs2 17-0.33.2 -- the versions the IHMC stack pins -- are not on
+    // Maven Central. This is the same repository the IHMC repository-group builds declare.
+    maven { url = uri("https://robotlabfiles.ihmc.us/repository/") }
 }
 
 java {

@@ -2,20 +2,27 @@
 # https://docs.gradle.org/current/userguide/platforms.html#sub::toml-dependencies-format
 
 [versions]
-# mecano 17-0.19.2 is the newest release on Maven Central; 17-0.19.3 exists only on
-# artifactory.ihmc.us. The "17-" prefix is the Java 17 flavor.
-mecano = "17-0.19.2"
+# Aligned with the IHMC stack (ihmc-avatar-interfaces declares mecano-graphviz 17-0.19.3), so
+# that this project and `us.ihmc.alex.*` can share one classpath in the SCS2 avatar-sim track.
+# 17-0.19.3 is not on Maven Central -- it comes from the IHMC repository declared in
+# build.gradle.kts. The "17-" prefix is the Java 17 flavor.
+mecano = "17-0.19.3"
 # mecano 17-0.19.2 pulls euclid 0.22.3 transitively; pinned up to the latest 0.22.x patch.
 euclid = "0.22.5"
 # The version euclid and mecano both already resolve to. Declared explicitly because
 # `registration` uses the SVD directly and must not depend on mecano to get it.
 ejml = "0.39"
-# scs2-definition only. It is the headless half of SCS2: URDFTools, RobotDefinition, and
-# RobotDefinition.newInstance() -> a Mecano RigidBodyBasics. It pulls no JavaFX, and its own
-# POM pins euclid 0.22.5 and mecano 17-0.19.2 -- exactly the versions above, so nothing here
-# is upgraded by adding it. The visualizer (scs2-session-visualizer-jfx) is a separate
-# artifact and is deliberately NOT declared until PR3.
-scs2 = "17-0.30.0"
+# scs2-definition is the headless half of SCS2: URDFTools, RobotDefinition, and
+# RobotDefinition.newInstance() -> a Mecano RigidBodyBasics. It pulls no JavaFX. The visualizer
+# (scs2-session-visualizer-jfx) is a separate artifact, used only by the `scs2` package.
+#
+# 17-0.33.2 rather than 17-0.30.0: ihmc-avatar-interfaces declares scs2-bullet-simulation
+# 17-0.33.2, and the mocap ground-truth track runs inside that SCS2 avatar simulation. Two
+# different SCS2 minor versions on one classpath is not a configuration anyone should debug, so
+# this project follows the stack rather than the stack following it. Every SCS2 behaviour
+# recorded in CLAUDE.md was verified against 17-0.30.0 and must be re-checked here -- notably
+# the URDF mesh-resolution and null-geometry NPEs.
+scs2 = "17-0.33.2"
 junit = "5.10.2"
 
 [libraries]

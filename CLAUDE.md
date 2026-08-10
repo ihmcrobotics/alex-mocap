@@ -284,6 +284,39 @@ project** — `AlexLegDemoTest` went from clean to indicting `RIGHT_KNEE_Y`. Any
 seeded generator must be behind the flag that needs it. `MarkerStandoffTest` pins that: turning the
 standoff off must leave the stream byte-identical.
 
+### Scattered markers work; G2's expected-spread model does not cope (PR5, OPEN)
+
+Markers scattered over each segment rather than grouped into a bracket — which is what anyone
+actually taping markers to a robot produces. Measured layout recovery against planted truth:
+
+| placement | noise | captures | layout RMS | worst |
+|---|---|---|---|---|
+| bracket | 0 | 60 | **0.0000 mm** | 0.0000 mm |
+| scattered | 0 | 60 | **0.0000 mm** | 0.0000 mm |
+| bracket | 0.3 mm | 60 | 0.2304 mm | 0.4051 mm |
+| scattered | 0.3 mm | 60 | 0.7639 mm | 1.2277 mm |
+| scattered | 0.3 mm | 200 | 0.2660 mm | 0.4575 mm |
+
+**Noiseless recovery is exact either way.** The framework does not care where the markers are —
+`^i p_ij` is solved for. Scattering costs *conditioning*, ~3× at equal capture count, and 200
+captures buys it back. The cause is the **gauge**, not the limbs: scattering the pelvis cluster over
+an ellipsoid gives a mean cluster radius of 0.148 m against the bracket's 0.165 m, and CLAUDE.md's
+own ordering (widen the gauge ≫ lower σ ≫ more captures) predicts exactly that. **Scatter the limb
+markers, keep the pelvis a wide outrigger bracket.**
+
+**The open problem: G2 fails on a scattered set.** 21 of 28 markers fail, every one of them with the
+verdict *"indicts nothing — isotropic, consistent with mocap noise; A′ is sufficient"*. The gate is
+comparing an observed back-projection spread of 7.5 mm against an expected 2.1 mm, and finding no
+structure in the disagreement. The layout is meanwhile recovered to ~1 mm. So the **expected**
+spread is what is wrong: it does not account for a cluster whose radius is large and whose lever arm
+to the gauge is long. This is the same class of problem as §9/§18.1's σ₂-versus-σ₃ — a gate
+threshold derived for one cluster geometry, applied to another.
+
+**Decision needed: does G2's expected spread need the cluster radius and gauge lever arm in it, or
+is a scattered set simply outside what §15 covers?** Until then a scattered run exits 1, which is
+why `AlexLegDemo` now prints the layout-recovery table *before* the exit check — a gate failure is
+exactly when you want to know whether the layout was actually recovered.
+
 ### The failure mode this project has
 
 **Every bug found here was a small residual with a wrong answer, never a loud one.** The gauge

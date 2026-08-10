@@ -7,10 +7,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 import us.ihmc.alexMocap.calibration.RobotCaptures;
+import us.ihmc.alexMocap.core.CalibrationResult;
+import us.ihmc.alexMocap.core.CalibrationResultIO;
+import us.ihmc.alexMocap.core.ClusterLayout;
 import us.ihmc.alexMocap.core.CsvEncoderLog;
 import us.ihmc.alexMocap.core.EncoderSample;
 import us.ihmc.alexMocap.mocap.MocapFrameRecorder;
 import us.ihmc.euclid.transform.RigidBodyTransform;
+import us.ihmc.euclid.tuple3D.Point3D;
 import us.ihmc.euclid.tuple4D.Quaternion;
 
 /**
@@ -167,9 +171,10 @@ public class AlexLegDemo
       // exposed once already would still be obvious here.
       options.basePosition(0.0, 0.0, GANTRY_HEIGHT);
 
-      // Stand the clusters off the limbs so they sit on the outside of the robot, where markers
-      // actually go and where they can be seen. Without this every marker is buried in the mesh.
-      options.standoff(GAUGE_STANDOFF, LIMB_STANDOFF);
+      // Markers scattered over each segment, on the outside of it. Not a bracket: four markers in a
+      // hand-sized patch is the easy case, and the question this demonstration exists to answer is
+      // whether the framework works with markers wherever they happen to be stuck.
+      options.standoff(GAUGE_STANDOFF, LIMB_STANDOFF).placement(RobotCaptures.MarkerPlacement.SCATTERED);
 
       if (!fullRange)
          options.sweepAboutRest(sweep).uncrossedLegs(MINIMUM_FOOT_SEPARATION);
@@ -199,9 +204,17 @@ public class AlexLegDemo
             path(outputDirectory, "encoders.csv"), "--urdf", modelUrdf.toString(), "--sigma", Double.toString(SIGMA), "--world-tilt", "0.08",
             "--output", path(outputDirectory, "calibration.json"), "--note", "AlexLegDemo"}, System.out, System.err);
 
+      // BEFORE the exit check, deliberately. A gate failure is exactly when someone most wants to
+      // know whether the layout was actually recovered -- and with a scattered marker set G2 fails
+      // on magnitude while explicitly reporting that it found no structure, which is a statement
+      // about the gate's expected-spread model rather than about the calibration.
+      reportLayoutRecovery(outputDirectory, planted);
+
       if (calibrationExit != 0)
       {
-         System.err.println("Calibration exited " + calibrationExit + "; not replaying.");
+         System.err.println();
+         System.err.println("Calibration exited " + calibrationExit + " (a gate failed); not replaying.");
+         System.err.println("Read the layout-recovery table above before concluding anything from that.");
          System.exit(calibrationExit);
       }
 
@@ -261,6 +274,64 @@ public class AlexLegDemo
       System.exit(replayExit);
    }
 
+
+   /**
+    * How close the solved layout came to the planted one -- <b>the number that answers "does this
+    * work"</b>, and the one only a synthetic session can report.
+    * <p>
+    * Worth printing next to the calibration report because the report's own headline, in-sample RMS,
+    * is a different and much larger quantity: it carries the base-pose fit residual as well as the
+    * layout error. Measured on the scattered leg set at sigma = 0.3 mm, in-sample RMS reads 4.5 mm
+    * while the layout is recovered to 0.76 mm -- a factor of six. The report already says "NOT an
+    * accuracy claim"; this is the accuracy claim.
+    * </p>
+    */
+   private static void reportLayoutRecovery(Path directory, RobotCaptures.Planted planted) throws Exception
+   {
+      CalibrationResult solved = CalibrationResultIO.read(directory.resolve("calibration.json"), planted.markers);
+
+      double sumSquared = 0.0;
+      double worst = 0.0;
+      int count = 0;
+      String worstMarker = "";
+
+      System.out.println();
+      System.out.println("layout recovery against planted truth (synthetic sessions only)");
+      System.out.println("  link            markers   rms (mm)   max (mm)");
+
+      for (ClusterLayout layout : solved.getLayouts())
+      {
+         ClusterLayout truth = planted.plantedLayout(layout.getLinkName());
+         double clusterSumSquared = 0.0;
+         double clusterWorst = 0.0;
+
+         for (int j = 0; j < layout.getMarkerCount(); j++)
+         {
+            double d = new Point3D(layout.getPositionInLinkFrame(j)).distance(new Point3D(truth.getPositionInLinkFrame(j)));
+            clusterSumSquared += d * d;
+            clusterWorst = Math.max(clusterWorst, d);
+
+            if (d > worst)
+            {
+               worst = d;
+               worstMarker = layout.getLinkName() + " marker " + j;
+            }
+         }
+
+         sumSquared += clusterSumSquared;
+         count += layout.getMarkerCount();
+
+         System.out.printf("  %-14s %7d   %8.4f   %8.4f%n",
+                           layout.getLinkName(),
+                           layout.getMarkerCount(),
+                           1000.0 * Math.sqrt(clusterSumSquared / layout.getMarkerCount()),
+                           1000.0 * clusterWorst);
+      }
+
+      System.out.printf("  overall RMS %.4f mm, worst %.4f mm (%s)%n", 1000.0 * Math.sqrt(sumSquared / count), 1000.0 * worst, worstMarker);
+      System.out.println("  This is layout error. The report's in-sample RMS above is a different, larger");
+      System.out.println("  quantity -- it carries the base-pose fit residual too, and is not an accuracy claim.");
+   }
 
    private static void writeCaptureSession(Path directory, RobotCaptures.Planted planted) throws Exception
    {

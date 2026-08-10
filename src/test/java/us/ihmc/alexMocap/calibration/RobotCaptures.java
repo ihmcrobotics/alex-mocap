@@ -126,6 +126,32 @@ public class RobotCaptures
     */
    private static final Point3D CLUSTER_CENTROID_OFFSET = new Point3D(0.021, -0.013, 0.034);
 
+   /** How the markers of one cluster are arranged on their link. */
+   public enum MarkerPlacement
+   {
+      /**
+       * All of a cluster's markers in a small box on one face, like a bolted-on bracket.
+       * <p>
+       * Compact and easy to mount, and the worst case for conditioning: a cluster whose extent is
+       * small compared to its distance from the link frame turns a little orientation error into a
+       * lot of position error.
+       * </p>
+       */
+      BRACKET,
+      /**
+       * Markers scattered over the whole segment, on an ellipsoidal shell around the link's centre
+       * of mass.
+       * <p>
+       * This is what taping markers all over a limb gives you, and it is the case worth testing: the
+       * constellation spans the segment rather than a hand-sized patch of it, so {@code σ₂} and
+       * {@code σ₃} are far larger and the pose is much better determined. It is also the honest
+       * test of the framework -- a marker set that only works when the markers are conveniently
+       * grouped is not much of a marker set.
+       * </p>
+       */
+      SCATTERED
+   }
+
    /** Knobs. Defaults are the clean, noiseless case with the primary marked set. */
    public static class Options
    {
@@ -270,6 +296,24 @@ public class RobotCaptures
       public double gaugeStandoff = Double.NaN;
 
       /**
+       * How a cluster's markers are arranged on its link.
+       * <p>
+       * {@link MarkerPlacement#BRACKET} is the default so that every existing seeded dataset keeps
+       * its numbers. {@link MarkerPlacement#SCATTERED} is what the demonstration uses.
+       * </p>
+       */
+      public MarkerPlacement placement = MarkerPlacement.BRACKET;
+
+      /**
+       * Fallback half-length for a link with no child joint to measure against, metres.
+       * <p>
+       * Only the feet, in the leg set. Everything else gets its extent from the offset to its child
+       * link, which is the segment length the URDF actually declares.
+       * </p>
+       */
+      public double terminalLinkHalfLength = 0.10;
+
+      /**
        * Reject and redraw a constellation whose second covariance eigenvalue falls below
        * {@code (spread/10)²}. See the class javadoc for why the guard is {@code λ₂} and not
        * {@code λ₃}.
@@ -335,6 +379,13 @@ public class RobotCaptures
       public Options uncrossedLegs(double minimumFootSeparationMetres)
       {
          this.minimumFootSeparation = minimumFootSeparationMetres;
+         return this;
+      }
+
+      /** @see #placement */
+      public Options placement(MarkerPlacement placement)
+      {
+         this.placement = placement;
          return this;
       }
 
@@ -449,6 +500,39 @@ public class RobotCaptures
       return left.getTranslationY() - right.getTranslationY();
    }
 
+   /**
+    * Half the distance from a link's frame to its furthest child link's frame, metres.
+    * <p>
+    * That distance <b>is</b> the segment length: Alex's link origins sit on their parent joint's
+    * axis, so {@code LEFT_THIGH}'s frame is at the hip and its child {@code LEFT_SHIN}'s is at the
+    * knee. Taking it from the model rather than from a table means the scatter follows whatever URDF
+    * is loaded, and a shin does not get a thigh's worth of markers.
+    * </p>
+    * <p>
+    * IMU and sensor stubs are children too and sit almost on top of their parent, which is why this
+    * takes the <b>maximum</b> over children rather than the mean: a mean would be dragged toward
+    * zero by every massless stub bolted to the segment.
+    * </p>
+    *
+    * @param fallback used for a link with no children at all -- only the feet, in the leg set.
+    */
+   private static double halfSegmentLength(RobotModelHandle model, String linkName, double fallback)
+   {
+      RigidBodyTransform childToLink = new RigidBodyTransform();
+      double furthest = 0.0;
+
+      for (String candidate : model.getLinkNames())
+      {
+         if (!linkName.equals(model.getParentLinkName(candidate)))
+            continue;
+
+         model.packLinkToLink(candidate, linkName, childToLink);
+         furthest = Math.max(furthest, childToLink.getTranslation().norm());
+      }
+
+      return furthest > 0.0 ? 0.5 * furthest : fallback;
+   }
+
    public static Planted generate(Options options) throws Exception
    {
       Random random = new Random(options.seed);
@@ -502,16 +586,23 @@ public class RobotCaptures
          double spread = isGauge ? options.gaugeClusterSpread : options.limbClusterSpread;
          double standoff = isGauge ? options.gaugeStandoff : options.limbStandoff;
 
-         // One azimuth per cluster: the four markers sit on one face of the segment, the way a
-         // bracket does, rather than being scattered around it.
-         //
-         // Drawn ONLY when a standoff is asked for. An unconditional draw here consumes a value
-         // from the stream and shifts every subsequent one, which silently changes every
-         // fixed-seed dataset in the project -- it re-poses the robot, re-noises the markers, and
-         // turns a clean G2 into an indictment of RIGHT_KNEE_Y. That is not a hypothetical: it is
-         // what this line did before the guard was added.
+         boolean scattered = options.placement == MarkerPlacement.SCATTERED;
          boolean standingOff = Double.isFinite(standoff) && standoff > 0.0;
-         double clusterAzimuth = standingOff ? 2.0 * Math.PI * random.nextDouble() : 0.0;
+
+         // One azimuth per cluster: in BRACKET the four markers sit on one face of the segment, the
+         // way a bolted-on plate does, rather than being scattered around it.
+         //
+         // Drawn ONLY when it is going to be used. An unconditional draw here consumes a value from
+         // the stream and shifts every subsequent one, which silently changes every fixed-seed
+         // dataset in the project -- it re-poses the robot, re-noises the markers, and turns a clean
+         // G2 into an indictment of RIGHT_KNEE_Y. That is not hypothetical; it is what this line did
+         // before the guard was added.
+         double clusterAzimuth = (standingOff && !scattered) ? 2.0 * Math.PI * random.nextDouble() : 0.0;
+
+         // Half the distance to the furthest child link: the segment's own length, as the URDF
+         // declares it. A terminal link -- only the feet, in the leg set -- has no child to measure
+         // against and falls back to a stated default.
+         double axialHalfLength = scattered ? halfSegmentLength(model, cluster.getLinkName(), options.terminalLinkHalfLength) : 0.0;
 
          model.packCenterOfMassInLinkFrame(cluster.getLinkName(), centerOfMass);
 
@@ -542,9 +633,33 @@ public class RobotCaptures
 
             for (int j = 0; j < constellation.length; j++)
             {
-               constellation[j] = new Point3D(centerOfMass.getX() + standoffX + spread * (random.nextDouble() - 0.5),
-                                              centerOfMass.getY() + standoffY + spread * (random.nextDouble() - 0.5),
-                                              centerOfMass.getZ() + standoffZ + spread * (random.nextDouble() - 0.5));
+               if (scattered)
+               {
+                  // A uniformly random direction, then scaled anisotropically: the lateral radius is
+                  // the standoff, the axial one is half the segment. That is an ellipsoidal shell
+                  // hugging the limb, so the markers land all over the segment rather than in a
+                  // patch -- which is what someone taping markers to a leg actually produces.
+                  //
+                  // cos(polar) uniform in [-1, 1] rather than the polar angle itself, or the draws
+                  // bunch at the ends of the segment.
+                  double cosPolar = 2.0 * random.nextDouble() - 1.0;
+                  double azimuth = 2.0 * Math.PI * random.nextDouble();
+                  double sinPolar = Math.sqrt(Math.max(0.0, 1.0 - cosPolar * cosPolar));
+
+                  // A little radial jitter so the markers are not exactly on one shell; real markers
+                  // sit on a surface that is not an ellipsoid.
+                  double radialScale = 1.0 + 0.15 * (random.nextDouble() - 0.5);
+
+                  constellation[j] = new Point3D(centerOfMass.getX() + CLUSTER_CENTROID_OFFSET.getX() + radialScale * standoff * sinPolar * Math.cos(azimuth),
+                                                 centerOfMass.getY() + CLUSTER_CENTROID_OFFSET.getY() + radialScale * standoff * sinPolar * Math.sin(azimuth),
+                                                 centerOfMass.getZ() + CLUSTER_CENTROID_OFFSET.getZ() + radialScale * axialHalfLength * cosPolar);
+               }
+               else
+               {
+                  constellation[j] = new Point3D(centerOfMass.getX() + standoffX + spread * (random.nextDouble() - 0.5),
+                                                 centerOfMass.getY() + standoffY + spread * (random.nextDouble() - 0.5),
+                                                 centerOfMass.getZ() + standoffZ + spread * (random.nextDouble() - 0.5));
+               }
             }
 
             if (!options.rejectCollinearConstellations || secondCovarianceEigenvalue(constellation) >= squared(spread / 10.0))

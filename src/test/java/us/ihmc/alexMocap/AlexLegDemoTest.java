@@ -376,7 +376,7 @@ public class AlexLegDemoTest
     * </p>
     * <p>
     * <b>The layout error is an order statistic with a fat tail.</b> Over ten seeds the worst-marker
-    * figure ranges 0.45-2.47 mm with a median near 0.7 mm. The tail is not noise in the estimate;
+    * figure ranges 0.45-2.47 mm with a median of 0.76 mm. The tail is not noise in the estimate;
     * it is RUNNING.md's "reference-shape noise does not average at all" -- {@code BaseInitializer}
     * defines the gauge cluster's shape from capture 0's marker positions, so an unlucky reference
     * capture is baked into the session. Seeds 7 and 9 draw a bad capture 0 and carry 24 and 20 mrad
@@ -716,13 +716,18 @@ public class AlexLegDemoTest
     * the pelvis through one {@code SPINE_Z} joint. FRAMEWORK.md §1 says that joint "carries the full
     * load in tension with off-axis deflection the URDF does not model" -- which is its reason for
     * refusing to make the torso the gauge, and is equally a reason not to leave the torso chained.
-    * Everything above the torso (head, both arms: 18.6 kg) chains through it as well, and
-    * {@code KinematicChainCoupler} attributes all of it to {@code PELVIS_LINK} because that is the
-    * nearest <i>marked</i> ancestor.
+    * Everything above the torso -- neck, head and both arms, <b>24.996 kg</b> -- chains through
+    * that same joint, and {@code KinematicChainCoupler} attributes all of it to
+    * {@code PELVIS_LINK} because that is the nearest <i>marked</i> ancestor. The remaining
+    * 6.287 kg is the four hip stubs and two ankle stubs. Exactly:
+    * {@code 22.210 + 24.996 + 6.287 = 53.493 kg}.
     * </p>
     * <p>
-    * Adding one torso cluster takes the chained fraction from 58.45% to 34.18%. That is the
-    * single highest-leverage marker decision available after the gauge itself.
+    * Adding one torso cluster takes the chained fraction from 58.45% to 34.18%. It removes
+    * {@code TORSO_LINK}'s own 22.21 kg; the 24.996 kg above it stays chained, but now hangs off a
+    * <i>measured</i> torso rather than off the pelvis through the one joint §1 says not to trust.
+    * The error path shortens by the joint that matters. That is the single highest-leverage marker
+    * decision available after the gauge itself.
     * </p>
     */
    @Test

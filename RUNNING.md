@@ -325,10 +325,18 @@ The first says that with the pelvis and six leg links marked, **58.45% of Alex i
 encoders, not on markers.** `TORSO_LINK` alone is 22.21 kg — 24.3% of the robot — chained off
 the pelvis through one `SPINE_Z` joint, the joint FRAMEWORK §1 refuses to make the gauge
 because "under suspension the spine joint carries the full load in tension with off-axis
-deflection the URDF does not model". Head and both arms (18.6 kg more) chain through it as
-well, and `KinematicChainCoupler` attributes all of them to `PELVIS_LINK` because that is the
-nearest *marked* ancestor. **Adding one torso cluster takes the chained fraction from 58.45%
-to 34.18%** — the highest-leverage marker decision available after the gauge itself.
+deflection the URDF does not model". Everything above the torso — neck, head and both arms,
+**24.996 kg** — chains through that same joint, and `KinematicChainCoupler` attributes all of
+it to `PELVIS_LINK`, because that is the nearest *marked* ancestor. The remaining 6.287 kg is
+the four hip stubs and two ankle stubs. Exactly:
+`22.210 + 24.996 + 6.287 = 53.493 kg`.
+
+**Adding one torso cluster takes the chained fraction from 58.45% to 34.18%.** Note what that
+does and does not buy: it removes `TORSO_LINK`'s own 22.21 kg from the chained set, and the
+24.996 kg above it stays chained — but it now hangs off a *measured* torso instead of off the
+pelvis through the one unmodelled joint FRAMEWORK §1 says not to trust. The error path
+shortens by the joint that matters. It is the highest-leverage marker decision available
+after the gauge itself.
 
 The second is the gauge cluster's angular error times the lever arm out to each link, and on
 Alex it is worse than on the toy for a purely geometric reason: pelvis origin to foot is

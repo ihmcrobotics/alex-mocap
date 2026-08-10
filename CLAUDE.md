@@ -200,10 +200,35 @@ and place the robot by bending its hip. And a refused pelvis (NaN pose) **holds 
 — assigning NaN puts it in the frame tree permanently, so one bad capture would blank the rest of
 the replay; the dropout is still visible through the CoM sphere vanishing.
 
-Not a bug, and asked about twice now: **the legs really do take strange postures.** The captures are
-a calibration sweep, drawn uniformly across each joint's full URDF range per FRAMEWORK.md §1, and
-that excursion is the signal A′ fits. `AlexLegDemo --excursion <f>` narrows it for legibility at a
-measured cost (in-sample RMS 2.047 mm at 0.3 versus 1.910 mm at 1.0).
+### "Full excursion" taken literally is absurd on Alex (fixed, PR5)
+
+FRAMEWORK.md §1 asks for as much joint excursion as the robot has, and the generator did exactly
+that: uniform independent draws across each joint's whole URDF range. On Alex, `HIP_Y` is
+`[-150°, +45°]` and `KNEE_Y` is `[0°, 140°]`, so a draw routinely folds one thigh against the chest
+while the other kicks forward. Rendered, it reads as a fault rather than as a robot on a gantry.
+
+Measured, feet relative to the pelvis:
+
+| sweep | feet below pelvis | stance |
+|---|---|---|
+| rest pose (all zeros) | 0.890 m | 0.240 m |
+| **rest ±0.45 rad — the demo default now** | ≥ 0.733 m | ≤ 0.932 m |
+| range midpoint | 0.683 m | 0.774 m |
+| full URDF range | **0.18–0.67 m** | up to 0.73 m |
+
+**The midpoint is a trap.** Alex's leg-range midpoint is `HIP_Y = -52.5°, KNEE_Y = +70°` — a deep
+tuck — so narrowing `jointExcursionFraction` (which centres there) converges on a *squat*. That is
+why `Options.sweepAboutRest(halfRange)` centres on the **rest** pose instead, clipping to the limits
+rather than shifting the window: a knee whose rest angle sits on `lower="0"` correctly gets a
+one-sided sweep.
+
+Cost, measured: in-sample RMS **1.987 mm** against **1.910 mm** full-range, still monotone with G2
+passing — about 4 % for a posture an operator could actually command. `--full-range` restores the
+old behaviour and `CapturePostureTest` pins both, including the negative case (a change that quietly
+narrowed every sweep would otherwise leave the property test passing and proving nothing).
+
+**The meshes do render** — confirmed visually on a machine with a display, which closes the item
+that could not be settled headlessly.
 
 ### The failure mode this project has
 
@@ -321,9 +346,10 @@ spelling in a *comment* only. If bare meshes ever come back, that is the thread 
 
 ### Also open
 
-- **Nobody has confirmed a window renders on a machine with a display.** JavaFX initialises here
-  (FXML loads, "Linking YoVariables") but this box is headless. This is now the only thing standing
-  between "meshes resolve" and "meshes draw".
+- ~~**Nobody has confirmed a window renders on a machine with a display.**~~ Confirmed in PR5: the
+  window opens, Alex draws with full meshes, and the pelvis triad and CoM sphere are in place. The
+  remaining nit is that the CoM sphere sits *inside* the pelvis mesh, so it is hard to find until
+  you hide the robot's visuals in the SCS2 tree.
 - **The SCS2 track is written but not compiled.** `integration/AlexMocapGroundTruthTrack.java` plus
   `integration/README.md`; it needs three edits in the `alex` repo (an `includeBuild`, a dependency,
   a file copy) that were deliberately not applied. APIs were checked with `javap` against

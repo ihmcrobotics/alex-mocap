@@ -164,6 +164,33 @@ public class RobotCaptures
        */
       public double jointExcursionFraction = 1.0;
 
+      /**
+       * If finite, sweep each randomised joint over {@code [rest ± this] ∩ limits} instead of about
+       * the range midpoint. Radians. NaN (the default) keeps the midpoint behaviour.
+       *
+       * <h2>Why a second knob rather than a smaller {@link #jointExcursionFraction}</h2>
+       * <p>
+       * The two centre on different places, and on Alex that difference is the whole point. The
+       * range midpoint is {@code HIP_Y = -52.5°, KNEE_Y = +70°} -- a deep tuck -- so narrowing
+       * {@code jointExcursionFraction} converges on a squat, not on a robot hanging from a gantry.
+       * Measured, feet relative to pelvis:
+       * </p>
+       * <pre>
+       * all zeros            0.890 m below, 0.240 m stance   <- hanging
+       * range midpoint       0.683 m below, 0.774 m stance   <- tucked and splayed
+       * full-range draws     0.18-0.67 m below               <- a foot 0.60 m forward
+       * rest ± 0.45 rad      >= 0.733 m below                <- hanging, and moving
+       * </pre>
+       * <p>
+       * This is also the more faithful model of the physical procedure. Nobody calibrating a robot
+       * on a gantry commands a 140° knee and a -150° hip; they move it through a reachable,
+       * non-self-colliding envelope about its rest posture. FRAMEWORK.md §1 asks for excursion, and
+       * it is right that excursion is what makes {@code Δ} identifiable -- but excursion about a
+       * sensible pose is what an operator can actually deliver.
+       * </p>
+       */
+      public double sweepHalfRangeRadians = Double.NaN;
+
       /** Base pose wander between captures: a suspended robot is not perfectly still. */
       public double basePositionWander = 0.02;
       public double baseOrientationWander = Math.toRadians(2.0);
@@ -226,6 +253,13 @@ public class RobotCaptures
       public Options excursionFraction(double fraction)
       {
          this.jointExcursionFraction = fraction;
+         return this;
+      }
+
+      /** @see #sweepHalfRangeRadians */
+      public Options sweepAboutRest(double halfRangeRadians)
+      {
+         this.sweepHalfRangeRadians = halfRangeRadians;
          return this;
       }
 
@@ -400,12 +434,27 @@ public class RobotCaptures
          if (!(upper > lower))
             throw new IllegalArgumentException("Joint '" + jointName + "' has an empty range [" + lower + ", " + upper + "].");
 
-         double midpoint = 0.5 * (lower + upper);
-         double halfSpan = 0.5 * options.jointExcursionFraction * (upper - lower);
-         sampleLower[j] = midpoint - halfSpan;
-         sampleUpper[j] = midpoint + halfSpan;
-
          held[j] = Math.max(lower, Math.min(upper, options.restAngle));
+
+         if (Double.isFinite(options.sweepHalfRangeRadians))
+         {
+            // Sweep about the rest pose, clipped to the limits. Not the same thing as a narrow
+            // excursion about the midpoint -- see Options.sweepAboutRest.
+            //
+            // Clipping rather than shifting is deliberate. A joint whose rest angle sits on a limit
+            // -- both knees do, lower="0" -- gets a one-sided sweep, which is correct: a knee bends
+            // one way. Shifting the window inward to preserve its width would sample angles on the
+            // far side of a hard stop, which the real joint cannot reach.
+            sampleLower[j] = Math.max(lower, held[j] - options.sweepHalfRangeRadians);
+            sampleUpper[j] = Math.min(upper, held[j] + options.sweepHalfRangeRadians);
+         }
+         else
+         {
+            double midpoint = 0.5 * (lower + upper);
+            double halfSpan = 0.5 * options.jointExcursionFraction * (upper - lower);
+            sampleLower[j] = midpoint - halfSpan;
+            sampleUpper[j] = midpoint + halfSpan;
+         }
 
          if (held[j] != options.restAngle)
             notes.add(String.format("%s: rest angle %.4f rad clamped to %.4f rad, limits [%.4f, %.4f]", jointName, options.restAngle, held[j], lower, upper));

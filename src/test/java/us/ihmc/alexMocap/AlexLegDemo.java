@@ -73,26 +73,34 @@ public class AlexLegDemo
    /** Enough for the A′ loop to be well determined; §17 asks for ≥ 30. */
    private static final int CAPTURES = 60;
 
+   /**
+    * Half-range of the leg sweep about the hanging rest pose, radians (25.8°).
+    * <p>
+    * Chosen from geometry, not taste: at this half-range the feet stay at least 0.733 m below the
+    * pelvis over 200 draws, so the robot always reads as hanging with its legs moving. The
+    * full-range alternative puts a foot 0.60 m forward and 0.18 m below the pelvis.
+    * </p>
+    */
+   private static final double DEFAULT_SWEEP_HALF_RANGE = 0.45;
+
    public static void main(String[] args) throws Exception
    {
       boolean visualize = !List.of(args).contains("--no-visualize");
       boolean degenerate = List.of(args).contains("--degenerate");
       Path outputDirectory = Path.of(argumentValue(args, "--out", "build/alex-demo")).toAbsolutePath();
 
-      // The default is the full sweep FRAMEWORK.md §1 asks for, and on screen it looks like it:
-      // every joint drawn uniformly across its whole URDF range, so the legs take postures no
-      // walking robot would. That is what a calibration capture session physically is -- the robot
-      // is on a gantry being moved through as much of its range as it has, because that excursion
-      // is what makes Δ and the layouts identifiable.
-      //
-      // This exists so the picture can be made legible when someone is looking at the geometry
-      // rather than at the calibration. It costs conditioning: the excursion is exactly the signal
-      // A′ is fitting, and narrowing it is the documented way to get a fit that "looks converged
-      // and means nothing".
-      double excursion = Double.parseDouble(argumentValue(args, "--excursion", "1.0"));
+      // How far each leg joint swings about the hanging rest pose, radians. See
+      // RobotCaptures.Options.sweepHalfRangeRadians for why this is a sweep about *rest* and not a
+      // narrowed sweep about the range midpoint -- on Alex the midpoint is a deep tuck.
+      double sweep = Double.parseDouble(argumentValue(args, "--sweep", Double.toString(DEFAULT_SWEEP_HALF_RANGE)));
 
-      if (!(excursion > 0.0) || excursion > 1.0)
-         throw new IllegalArgumentException("--excursion must be in (0, 1], was " + excursion + ".");
+      if (!(sweep > 0.0) || sweep > Math.PI)
+         throw new IllegalArgumentException("--sweep is a half-range in radians and must be in (0, π], was " + sweep + ".");
+
+      // The old behaviour: every joint drawn uniformly across its whole URDF range. It is what
+      // FRAMEWORK.md §1 literally asks for and it conditions the fit best, but it puts the robot in
+      // postures no operator would command -- a foot 0.60 m forward and 0.18 m below the pelvis.
+      boolean fullRange = List.of(args).contains("--full-range");
 
       Files.createDirectories(outputDirectory);
 
@@ -103,8 +111,8 @@ public class AlexLegDemo
       System.out.println("=".repeat(78));
       System.out.println("marked   " + String.join(", ", markedLinks));
       System.out.println("captures " + CAPTURES + " at sigma = " + 1000.0 * SIGMA + " mm");
-      System.out.println("sweep    " + (100.0 * excursion) + "% of each joint's range"
-            + (excursion < 1.0 ? "  (narrowed: conditioning is worse than the default)" : "  (full, per FRAMEWORK.md section 1)"));
+      System.out.println("sweep    " + (fullRange ? "full URDF range per joint (FRAMEWORK.md section 1; postures no operator would command)"
+            : String.format("+-%.2f rad (%.0f deg) about the hanging rest pose", sweep, Math.toDegrees(sweep))));
       System.out.println("output   " + outputDirectory);
       System.out.println();
 
@@ -112,8 +120,9 @@ public class AlexLegDemo
       RobotCaptures.Options options = new RobotCaptures.Options().captures(CAPTURES)
                                                                  .noise(SIGMA)
                                                                  .randomize(RobotCaptures.LEG_JOINTS)
-                                                                 .excursionFraction(excursion)
                                                                  .marked(markedLinks);
+      if (!fullRange)
+         options.sweepAboutRest(sweep);
       if (degenerate)
          options.noise(0.0);
 

@@ -274,7 +274,8 @@ export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 ./gradlew alexLegDemo                                  # opens the SCS2 window
 ./gradlew alexLegDemo --args="--no-visualize"          # headless / over SSH
 ./gradlew alexLegDemo --args="--degenerate"
-./gradlew alexLegDemo --args="--excursion 0.3"         # narrower sweep, easier to look at
+./gradlew alexLegDemo --args="--sweep 0.6"             # wider leg swing about the rest pose
+./gradlew alexLegDemo --args="--full-range"            # every joint across its whole URDF range
 ```
 
 Or open `src/test/java/us/ihmc/alexMocap/AlexLegDemo.java` in IntelliJ and hit the green arrow
@@ -303,15 +304,31 @@ whole-body CoM, the pelvis coordinate system, and every conditioning variable av
 plot.
 
 The robot is drawn **where the markers say it was** — suspended around `(1.0, 2.0, 1.4)` for
-this capture set, not at the origin — with the CoM sphere a few centimetres inside it. Its legs
-take postures no walking robot would, and that is correct: a calibration capture session is not
-a walk. FRAMEWORK.md §1 asks for as much joint excursion as the robot has, because that
-excursion is exactly what makes `Δ` and the layouts identifiable. Successive captures are
-independent draws, so the replay *steps* between poses rather than sweeping through them.
+this capture set, not at the origin — with the CoM sphere a few centimetres inside it. It hangs
+with its legs swinging ±0.45 rad (26°) about the straight-legged rest pose, which is what a
+gantry calibration physically looks like. Successive captures are independent draws, so the
+replay *steps* between poses rather than sweeping through them.
 
-`--excursion 0.3` narrows the sweep if you are looking at the geometry rather than at the
-calibration. It is worse conditioned, and measurably so — in-sample RMS 2.047 mm at 0.3 against
-1.910 mm at the full sweep — which is why the default stays at 1.0. It **replays** rather than simulates — the session is built with
+**Why not the full URDF range.** FRAMEWORK.md §1 asks for as much joint excursion as the robot
+has, and that excursion is what makes `Δ` identifiable — but taken literally on Alex it is
+absurd. `HIP_Y` is `[-150°, +45°]` and `KNEE_Y` is `[0°, 140°]`, so independent uniform draws
+fold one thigh against the chest while the other kicks forward. Measured, feet relative to the
+pelvis:
+
+| sweep | feet below pelvis | stance width |
+|---|---|---|
+| rest pose (all zeros) | 0.890 m | 0.240 m |
+| **default, rest ±0.45 rad** | **≥ 0.733 m** | ≤ 0.932 m |
+| range midpoint | 0.683 m | 0.774 m |
+| full URDF range | **0.18 – 0.67 m** | up to 0.73 m |
+
+Note the range *midpoint* is `HIP_Y = -52.5°, KNEE_Y = +70°` — a deep tuck — so simply narrowing
+the sweep about the midpoint converges on a squat, not on a hanging robot. That is why the knob
+is `--sweep` (a half-range about **rest**) and not a fraction of the range.
+
+It costs about 4 %: in-sample RMS **1.987 mm** against **1.910 mm** for the full range, still
+monotone-convergent with G2 passing. `--full-range` restores the old behaviour.
+`CapturePostureTest` pins the geometry both ways. It **replays** rather than simulates — the session is built with
 `newDoNothingPhysicsEngineFactory()`, so nothing integrates the robot forward and overwrites
 the poses being inspected. Press play; the timeline is the capture index.
 

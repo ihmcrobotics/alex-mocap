@@ -246,6 +246,30 @@ public class RobotCaptures
       public double limbClusterSpread = 0.06;
 
       /**
+       * How far a cluster stands off sideways from its link's centre of mass, metres. NaN or 0
+       * leaves it at {@code ^i c_i}, which is the old behaviour.
+       *
+       * <h2>Why this exists</h2>
+       * <p>
+       * Without it every marker lands within a few centimetres of the link's centre of mass -- that
+       * is, <b>inside the link</b>. The arithmetic does not care: {@code ^i p_ij} is solved for, so
+       * a cluster buried in the thigh calibrates exactly as well as one taped to it. Two things do
+       * care. Nobody can see the markers, because the mesh is drawn over them, which makes a mocap
+       * demonstration in which the mocap is invisible. And it is not where markers go, so the lever
+       * arms in the error budget are shorter than the real ones.
+       * </p>
+       * <p>
+       * The offset is applied perpendicular to the limb's long axis, at one azimuth per cluster: a
+       * bracket is bolted to the side of a segment and its markers share a face. Offsetting along
+       * the long axis instead would put the thigh's markers near the knee.
+       * </p>
+       */
+      public double limbStandoff = Double.NaN;
+
+      /** @see #limbStandoff */
+      public double gaugeStandoff = Double.NaN;
+
+      /**
        * Reject and redraw a constellation whose second covariance eigenvalue falls below
        * {@code (spread/10)²}. See the class javadoc for why the guard is {@code λ₂} and not
        * {@code λ₃}.
@@ -311,6 +335,14 @@ public class RobotCaptures
       public Options uncrossedLegs(double minimumFootSeparationMetres)
       {
          this.minimumFootSeparation = minimumFootSeparationMetres;
+         return this;
+      }
+
+      /** @see #limbStandoff */
+      public Options standoff(double gaugeMetres, double limbMetres)
+      {
+         this.gaugeStandoff = gaugeMetres;
+         this.limbStandoff = limbMetres;
          return this;
       }
 
@@ -468,6 +500,18 @@ public class RobotCaptures
 
          boolean isGauge = cluster.getLinkName().equals(model.getBaseLinkName());
          double spread = isGauge ? options.gaugeClusterSpread : options.limbClusterSpread;
+         double standoff = isGauge ? options.gaugeStandoff : options.limbStandoff;
+
+         // One azimuth per cluster: the four markers sit on one face of the segment, the way a
+         // bracket does, rather than being scattered around it.
+         //
+         // Drawn ONLY when a standoff is asked for. An unconditional draw here consumes a value
+         // from the stream and shifts every subsequent one, which silently changes every
+         // fixed-seed dataset in the project -- it re-poses the robot, re-noises the markers, and
+         // turns a clean G2 into an indictment of RIGHT_KNEE_Y. That is not a hypothetical: it is
+         // what this line did before the guard was added.
+         boolean standingOff = Double.isFinite(standoff) && standoff > 0.0;
+         double clusterAzimuth = standingOff ? 2.0 * Math.PI * random.nextDouble() : 0.0;
 
          model.packCenterOfMassInLinkFrame(cluster.getLinkName(), centerOfMass);
 
@@ -477,11 +521,30 @@ public class RobotCaptures
          // spreads a rejection is rare, and a loop that cannot terminate is worse than a throw.
          for (int attempt = 0;; attempt++)
          {
+            // Where the cluster sits relative to the link's centre of mass. Without a standoff the
+            // markers land within a few centimetres of ^i c_i, which is INSIDE the link -- fine for
+            // the arithmetic, invisible on screen, and not where anyone tapes a marker.
+            double standoffX = CLUSTER_CENTROID_OFFSET.getX();
+            double standoffY = CLUSTER_CENTROID_OFFSET.getY();
+            double standoffZ = CLUSTER_CENTROID_OFFSET.getZ();
+
+            if (standingOff)
+            {
+               // Push the cluster out sideways, perpendicular to the limb's long axis. A real
+               // bracket is bolted to the side of a segment, not to its end -- an offset along the
+               // long axis would put the thigh's markers somewhere near the knee.
+               //
+               // The azimuth is drawn once per cluster, so the four markers stay on one face
+               // instead of being scattered around the limb.
+               standoffX += standoff * Math.cos(clusterAzimuth);
+               standoffY += standoff * Math.sin(clusterAzimuth);
+            }
+
             for (int j = 0; j < constellation.length; j++)
             {
-               constellation[j] = new Point3D(centerOfMass.getX() + CLUSTER_CENTROID_OFFSET.getX() + spread * (random.nextDouble() - 0.5),
-                                              centerOfMass.getY() + CLUSTER_CENTROID_OFFSET.getY() + spread * (random.nextDouble() - 0.5),
-                                              centerOfMass.getZ() + CLUSTER_CENTROID_OFFSET.getZ() + spread * (random.nextDouble() - 0.5));
+               constellation[j] = new Point3D(centerOfMass.getX() + standoffX + spread * (random.nextDouble() - 0.5),
+                                              centerOfMass.getY() + standoffY + spread * (random.nextDouble() - 0.5),
+                                              centerOfMass.getZ() + standoffZ + spread * (random.nextDouble() - 0.5));
             }
 
             if (!options.rejectCollinearConstellations || secondCovarianceEigenvalue(constellation) >= squared(spread / 10.0))

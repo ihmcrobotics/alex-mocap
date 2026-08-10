@@ -109,6 +109,20 @@ public class AlexLegDemo
     */
    private static final double GANTRY_HEIGHT = 1.4;
 
+   /**
+    * How far the clusters stand off sideways from each link's centre of mass, metres.
+    * <p>
+    * Alex's thighs and shins are roughly 0.08 m in radius, so 0.12 m puts a limb cluster clear of
+    * the mesh with a small gap -- a bracket bolted to the segment rather than markers floating in
+    * space. The pelvis gets more because §1's gauge bracket is an outrigger anyway, and because
+    * every other link's accuracy is multiplied by the gauge's angular error.
+    * </p>
+    */
+   private static final double LIMB_STANDOFF = 0.12;
+
+   /** @see #LIMB_STANDOFF */
+   private static final double GAUGE_STANDOFF = 0.18;
+
    public static void main(String[] args) throws Exception
    {
       boolean visualize = !List.of(args).contains("--no-visualize");
@@ -152,6 +166,10 @@ public class AlexLegDemo
       // a robot mistakenly drawn at identity would sit at z = 0, so the placement fault this demo
       // exposed once already would still be obvious here.
       options.basePosition(0.0, 0.0, GANTRY_HEIGHT);
+
+      // Stand the clusters off the limbs so they sit on the outside of the robot, where markers
+      // actually go and where they can be seen. Without this every marker is buried in the mesh.
+      options.standoff(GAUGE_STANDOFF, LIMB_STANDOFF);
 
       if (!fullRange)
          options.sweepAboutRest(sweep).uncrossedLegs(MINIMUM_FOOT_SEPARATION);

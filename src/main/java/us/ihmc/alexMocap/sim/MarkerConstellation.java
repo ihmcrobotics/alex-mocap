@@ -87,6 +87,26 @@ public final class MarkerConstellation
    public static final double DEFAULT_LIMB_SPREAD = 0.06;
 
    /**
+    * How far a limb cluster stands off sideways from its link's centre of mass, metres.
+    * <p>
+    * Markers go on the outside of a segment, not at its centre of mass. Alex's thighs and shins are
+    * roughly 0.08 m in radius, so this clears the surface with a small gap -- a bracket bolted on,
+    * rather than markers floating inside the link.
+    * </p>
+    * <p>
+    * It is not cosmetic. {@code ^i p_ij} is solved for, so a cluster buried at {@code ^i c_i}
+    * calibrates exactly as well; but the lever arm from the link frame to its markers is what turns
+    * cluster <i>orientation</i> error into link <i>position</i> error, and a buried cluster has a
+    * shorter one than any real bracket. It also cannot be seen, which makes a mocap demonstration
+    * with invisible mocap.
+    * </p>
+    */
+   public static final double DEFAULT_LIMB_STANDOFF = 0.12;
+
+   /** As {@link #DEFAULT_LIMB_STANDOFF}, for the gauge. §1's bracket is an outrigger anyway. */
+   public static final double DEFAULT_GAUGE_STANDOFF = 0.18;
+
+   /**
     * A draw is rejected when {@code σ₂ < (spread · COLLINEARITY_FRACTION)²}.
     * <p>
     * One tenth of the spread is loose enough that rejections are rare at these cluster sizes -- so
@@ -130,7 +150,8 @@ public final class MarkerConstellation
     */
    public static MarkerConstellation random(RobotModelHandle model, List<String> markedLinks, long seed)
    {
-      return random(model, markedLinks, seed, DEFAULT_MARKERS_PER_CLUSTER, DEFAULT_GAUGE_SPREAD, DEFAULT_LIMB_SPREAD);
+      return random(model, markedLinks, seed, DEFAULT_MARKERS_PER_CLUSTER, DEFAULT_GAUGE_SPREAD, DEFAULT_LIMB_SPREAD, DEFAULT_GAUGE_STANDOFF,
+                    DEFAULT_LIMB_STANDOFF);
    }
 
    /**
@@ -154,6 +175,26 @@ public final class MarkerConstellation
                                             int markersPerCluster,
                                             double gaugeSpread,
                                             double limbSpread)
+   {
+      return random(model, markedLinks, seed, markersPerCluster, gaugeSpread, limbSpread, DEFAULT_GAUGE_STANDOFF, DEFAULT_LIMB_STANDOFF);
+   }
+
+   /**
+    * Draws a marker set with the cluster standoffs given explicitly.
+    *
+    * @param gaugeStandoff how far the gauge cluster stands off its link's centre of mass, metres.
+    * @param limbStandoff  the same for a limb cluster. Zero puts the cluster at the centre of mass,
+    *                      which is inside the link.
+    * @see #DEFAULT_LIMB_STANDOFF
+    */
+   public static MarkerConstellation random(RobotModelHandle model,
+                                            List<String> markedLinks,
+                                            long seed,
+                                            int markersPerCluster,
+                                            double gaugeSpread,
+                                            double limbSpread,
+                                            double gaugeStandoff,
+                                            double limbStandoff)
    {
       if (model == null)
          throw new IllegalArgumentException("Model must not be null.");
@@ -211,9 +252,18 @@ public final class MarkerConstellation
 
          boolean isGauge = cluster.getLinkName().equals(model.getBaseLinkName());
          double spread = isGauge ? gaugeSpread : limbSpread;
+         double standoff = isGauge ? gaugeStandoff : limbStandoff;
          double minimumSigma2 = squared(spread * COLLINEARITY_FRACTION);
 
          model.packCenterOfMassInLinkFrame(cluster.getLinkName(), linkCenterOfMass);
+
+         // One azimuth per cluster, applied perpendicular to the limb's long axis: the markers share
+         // one face, the way a bracket does. An offset along the long axis would put the thigh's
+         // markers near the knee -- which calibrates perfectly well and is wrong.
+         double azimuth = 2.0 * Math.PI * random.nextDouble();
+         double offsetX = CLUSTER_CENTROID_OFFSET.getX() + standoff * Math.cos(azimuth);
+         double offsetY = CLUSTER_CENTROID_OFFSET.getY() + standoff * Math.sin(azimuth);
+         double offsetZ = CLUSTER_CENTROID_OFFSET.getZ();
 
          Point3D[] constellation = new Point3D[cluster.getMarkerCount()];
 
@@ -221,9 +271,9 @@ public final class MarkerConstellation
          {
             for (int j = 0; j < constellation.length; j++)
             {
-               constellation[j] = new Point3D(linkCenterOfMass.getX() + CLUSTER_CENTROID_OFFSET.getX() + spread * (random.nextDouble() - 0.5),
-                                              linkCenterOfMass.getY() + CLUSTER_CENTROID_OFFSET.getY() + spread * (random.nextDouble() - 0.5),
-                                              linkCenterOfMass.getZ() + CLUSTER_CENTROID_OFFSET.getZ() + spread * (random.nextDouble() - 0.5));
+               constellation[j] = new Point3D(linkCenterOfMass.getX() + offsetX + spread * (random.nextDouble() - 0.5),
+                                              linkCenterOfMass.getY() + offsetY + spread * (random.nextDouble() - 0.5),
+                                              linkCenterOfMass.getZ() + offsetZ + spread * (random.nextDouble() - 0.5));
             }
 
             if (secondCovarianceEigenvalue(registration, result, constellation) >= minimumSigma2)

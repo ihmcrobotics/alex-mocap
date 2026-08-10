@@ -255,6 +255,35 @@ legs *together* and no per-joint bound expresses it without discarding most of t
 demo now hangs the robot at `(0, 0, 1.4)` rather than `RobotCaptures`' off-origin default, keeping
 the gantry height so a robot mistakenly drawn at identity would still be obvious.
 
+### The markers were inside the robot (fixed, PR5)
+
+Every cluster was planted within about 4 cm of its link's **centre of mass** — that is, buried in the
+link. The calibration cannot tell: `^i p_ij` is solved for, so a cluster inside the thigh fits
+exactly as well as one bolted to it, and every number in every report was unaffected. Two things
+were not:
+
+- the mesh is drawn over them, so the markers were **invisible** — a mocap demonstration with no
+  visible mocap;
+- it is not where markers go. The lever arm from a link frame to its markers is what converts
+  cluster *orientation* error into link *position* error, and a buried cluster has a shorter one
+  than any real bracket, so the error budget was optimistic in a way nothing reported.
+
+`Options.standoff(gauge, limb)` and `MarkerConstellation`'s `DEFAULT_*_STANDOFF` now push each
+cluster **sideways** — perpendicular to the segment's long axis, at one azimuth per cluster, so the
+four markers share a face like a real bracket. Along the long axis instead would put the thigh's
+markers near the knee, which also calibrates fine and is also wrong. Demo values: 0.12 m limb
+(Alex's thighs and shins are ~0.08 m in radius), 0.18 m gauge.
+
+In-sample RMS moves 2.028 → 2.282 mm. That is not a regression: the lever arms changed, and the
+new ones are the physical ones.
+
+**A trap worth remembering.** The first version drew the per-cluster azimuth *unconditionally*.
+That consumes one value from the `Random` stream per cluster and shifts every subsequent draw, which
+silently re-poses the robot and re-noises every marker in **every fixed-seed dataset in the
+project** — `AlexLegDemoTest` went from clean to indicting `RIGHT_KNEE_Y`. Any new draw added to a
+seeded generator must be behind the flag that needs it. `MarkerStandoffTest` pins that: turning the
+standoff off must leave the stream byte-identical.
+
 ### The failure mode this project has
 
 **Every bug found here was a small residual with a wrong answer, never a loud one.** The gauge

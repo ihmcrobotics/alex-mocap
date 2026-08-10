@@ -53,22 +53,32 @@ import us.ihmc.yoVariables.variable.YoInteger;
  */
 public class MocapMarkerYoVariables
 {
-   /** Radius of a marker sphere, metres. A real passive marker is about this size. */
-   public static final double MARKER_RADIUS = 0.012;
+   /**
+    * Radius of a marker sphere, metres.
+    * <p>
+    * A real passive marker is about 6 mm in radius. This is drawn at 20 mm deliberately: at true
+    * scale, against a 1.8 m robot, a marker is a couple of pixels until you are almost inside the
+    * model, and the point of drawing them is to see the set at a glance. Anything reading a
+    * <i>distance</i> off this view is misreading it -- the numbers are in the YoVariables.
+    * </p>
+    */
+   public static final double MARKER_RADIUS = 0.020;
 
    /**
     * Cycled over the clusters, in marked-link order.
     * <p>
-    * Chosen to stay distinguishable against SCS2's default background and against each other; the
-    * gauge cluster takes the first entry, which is why it is the brightest.
+    * Green first, and no blues. The robot is drawn grey and its reconstruction ghost is translucent
+    * cyan, so a sky-blue or cyan marker disappears into the ghost exactly where the markers matter
+    * most. Every entry here is chosen to survive being drawn over pale cyan, over dark grey, and
+    * over SCS2's default sky.
     * </p>
     */
-   public static final List<ColorDefinition> CLUSTER_COLORS = List.of(ColorDefinitions.Yellow(),
-                                                                      ColorDefinitions.DeepSkyBlue(),
+   public static final List<ColorDefinition> CLUSTER_COLORS = List.of(ColorDefinitions.LimeGreen(),
                                                                       ColorDefinitions.OrangeRed(),
-                                                                      ColorDefinitions.LimeGreen(),
+                                                                      ColorDefinitions.Yellow(),
                                                                       ColorDefinitions.Magenta(),
-                                                                      ColorDefinitions.Cyan(),
+                                                                      ColorDefinitions.Chartreuse(),
+                                                                      ColorDefinitions.DarkOrange(),
                                                                       ColorDefinitions.White());
 
    private final YoRegistry registry;

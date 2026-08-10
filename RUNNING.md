@@ -309,8 +309,14 @@ You get three things overlaid:
 |---|---|
 | the robot at **truth** | solid, at the planted base pose |
 | the **mocap reconstruction** | translucent cyan **ghost** |
-| the 28 **markers** | spheres, coloured per cluster (yellow = pelvis gauge) |
+| the 28 **markers** | 20 mm spheres, coloured per cluster (green = pelvis gauge) |
 | the CoM | small gold sphere, inside the pelvis |
+
+The markers stand off the **outside** of each segment — 0.12 m from a limb's centre of mass,
+0.18 m for the pelvis outrigger — because that is where markers go and because a cluster at the
+link centre of mass is drawn inside the mesh and cannot be seen at all. They are drawn at 20 mm
+radius rather than a real marker's 6 mm so the set reads at a glance; do not measure distances
+off the picture.
 
 On a healthy leg marker set the ghost sits on top of the solid robot — that *is* the result.
 Run `--degenerate` and it walks ~56 mm off along x: the same number the report prints, except

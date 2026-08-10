@@ -68,9 +68,21 @@ public class PackageDependencyTest
       ALLOWED_DEPENDENCIES.put("gates", Set.of("core", "model", "registration"));
       ALLOWED_DEPENDENCIES.put("calibration", Set.of("core", "model", "frames", "registration"));
       ALLOWED_DEPENDENCIES.put("runtime", Set.of("core", "model", "frames", "registration"));
-      ALLOWED_DEPENDENCIES.put("scs2", Set.of("core", "model", "mocap", "frames", "registration", "calibration", "runtime", "postprocess", "gates"));
+      // `sim` invents marker observations from known link poses: the sensor half of a simulated
+      // system. It depends on `registration` for one thing only -- σ₂ of a candidate constellation,
+      // via a self-registration -- because FRAMEWORK.md §2 allows exactly one SVD in this project
+      // and a second one here could disagree with the estimator's refusal threshold.
+      //
+      // Note what is NOT in this set: `calibration`. That is the guard. `sim` can produce markers
+      // and it can produce a layout, but it cannot reach the code that turns captures into a
+      // calibration, so no path exists through this package that ends in a calibration solved
+      // against invented data.
+      ALLOWED_DEPENDENCIES.put("sim", Set.of("core", "model", "registration"));
+      ALLOWED_DEPENDENCIES.put("scs2",
+                               Set.of("core", "model", "mocap", "frames", "registration", "calibration", "runtime", "postprocess", "gates", "sim"));
       // The root package holds the CLI entry points, which wire everything together.
-      ALLOWED_DEPENDENCIES.put("", Set.of("core", "model", "mocap", "frames", "registration", "calibration", "runtime", "postprocess", "gates", "scs2"));
+      ALLOWED_DEPENDENCIES.put("",
+                               Set.of("core", "model", "mocap", "frames", "registration", "calibration", "runtime", "postprocess", "gates", "scs2", "sim"));
    }
 
    @Test

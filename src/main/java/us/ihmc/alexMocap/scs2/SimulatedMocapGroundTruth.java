@@ -14,6 +14,7 @@ import us.ihmc.alexMocap.runtime.KinematicChainCoupler;
 import us.ihmc.alexMocap.runtime.LinkPoseEstimator;
 import us.ihmc.alexMocap.runtime.MeasuredLinkPoses;
 import us.ihmc.alexMocap.sim.MarkerConstellation;
+import us.ihmc.alexMocap.sim.MarkerConstellation.MarkerPlacement;
 import us.ihmc.alexMocap.sim.SimulatedMocapCamera;
 import us.ihmc.euclid.tuple3D.Point3D;
 import us.ihmc.euclid.tuple3D.interfaces.Point3DReadOnly;
@@ -171,7 +172,33 @@ public class SimulatedMocapGroundTruth
                                                          long seed,
                                                          GravityAlignedWorldFrame world)
    {
-      MarkerConstellation constellation = MarkerConstellation.random(model, markedLinks, seed);
+      return demonstration(namePrefix, model, markedLinks, markerNoiseStandardDeviation, occlusionProbability, seed, world, MarkerPlacement.BRACKET);
+   }
+
+   /**
+    * As {@link #demonstration}, with the marker placement chosen.
+    *
+    * @param placement {@link MarkerPlacement#SCATTERED} is what {@code AlexLegDemo} uses -- markers
+    *                  spread over each segment rather than patched onto one face of it.
+    */
+   public static SimulatedMocapGroundTruth demonstration(String namePrefix,
+                                                         RobotModelHandle model,
+                                                         List<String> markedLinks,
+                                                         double markerNoiseStandardDeviation,
+                                                         double occlusionProbability,
+                                                         long seed,
+                                                         GravityAlignedWorldFrame world,
+                                                         MarkerPlacement placement)
+   {
+      MarkerConstellation constellation = MarkerConstellation.random(model,
+                                                                     markedLinks,
+                                                                     seed,
+                                                                     MarkerConstellation.DEFAULT_MARKERS_PER_CLUSTER,
+                                                                     MarkerConstellation.DEFAULT_GAUGE_SPREAD,
+                                                                     MarkerConstellation.DEFAULT_LIMB_SPREAD,
+                                                                     MarkerConstellation.DEFAULT_GAUGE_STANDOFF,
+                                                                     MarkerConstellation.DEFAULT_LIMB_STANDOFF,
+                                                                     placement);
       SimulatedMocapCamera camera = new SimulatedMocapCamera(constellation, markerNoiseStandardDeviation, occlusionProbability, seed);
 
       CalibrationResult planted = new CalibrationResult();
@@ -268,6 +295,21 @@ public class SimulatedMocapGroundTruth
    public RobotModelHandle getModel()
    {
       return model;
+   }
+
+   /**
+    * Where the last {@link #update} put each link: {@code ^W T_i}, measured for the marked links and
+    * chained through the encoders for the rest.
+    * <p>
+    * This is the reconstruction itself rather than a summary of it, which is what a caller drawing a
+    * ghost robot at the measured pose needs. Live and overwritten every tick -- read it inside the
+    * tick, do not retain it. Check {@link MeasuredLinkPoses#getSource} before trusting a pose: a
+    * refused cluster leaves NaN, and NaN is the honest value, not a defect to be defaulted away.
+    * </p>
+    */
+   public MeasuredLinkPoses getLinkPoses()
+   {
+      return poses;
    }
 
    /**

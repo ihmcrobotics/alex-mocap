@@ -223,30 +223,164 @@ against the simulation's real one. This is the live demo; `AlexLegDemo` below is
 replay it grew out of.
 
 It lives in the **`alex` repository**, next to `AlexFlatGroundWalkingTrack`, because it needs
-`AlexRobotModel` and the walking controller. The library half is finished here and tested; the
-track itself is in **`integration/`** and is **not yet applied** — see `integration/README.md`
-for the three edits (one `includeBuild`, one dependency, one file copy).
-
-Once wired:
+`AlexRobotModel` and the walking controller. **It is wired and running** — the three edits in
+`integration/README.md` (one `includeBuild`, one dependency, one file copy) have been applied,
+and the copy under `alex/src/main/java/us/ihmc/alex/simulation/` is now the live one.
 
 ```bash
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
-cd ~/workspaces/mocap/alex && ../gradlew compileJava
-# then green-arrow us.ihmc.alex.simulation.AlexMocapGroundTruthTrack from IntelliJ
+cd ~/workspaces/mocap/alex
+
+../gradlew alexMocapGroundTruthTrack                                    # opens the SCS2 window
+../gradlew alexMocapGroundTruthTrack -Dmocap.headless=true -Dmocap.duration=15.0   # no window
 ```
 
-`-Dmocap.occlusion=0.12` turns on occlusion; leave it off unless you want to see refusals.
+Or green-arrow `us.ihmc.alex.simulation.AlexMocapGroundTruthTrack` from IntelliJ.
+
+| property | default | what it does |
+|---|---|---|
+| `-Dmocap.headless` | `false` | no window: simulate `mocap.duration` seconds, print the CoM error, exit |
+| `-Dmocap.duration` | `10.0` | seconds of **simulated** time headless mode runs |
+| `-Dmocap.occlusion` | `0.0` | occlusion probability; at `0.12` it refuses 63 % of frames |
+
+**`-D` flags are forwarded explicitly** by the `alexMocapGroundTruthTrack` task in
+`alex/build.gradle.kts`. Gradle's `JavaExec` forks a JVM that does *not* inherit the launching
+JVM's system properties, so without that forwarding `-Dmocap.headless=true` is accepted and
+silently does nothing — you get the window you were trying to avoid and no error. Same trap as
+`-Dalex.demo.verbose` on the `Test` task.
+
+**The robot walks by itself.** The track sets `walkCSG` and `ignoreWalkInputProviderCSG` to true
+after `start()`. Both are needed: `walkCSG` is the command, and `ignoreWalkInputProviderCSG` stops
+the `ContinuousStepGenerator` having it immediately overruled by the ROS 2 walk input provider,
+which nothing is publishing to here. Set only `walkCSG` and the robot takes no step, with nothing
+logged to say why.
 
 **On screen:** 28 marker spheres (four per link, coloured per cluster, yellow = pelvis gauge),
-a **gold** sphere at the mocap CoM and a **green** one at the simulation's. They overlap when
-things are right. Plot `mocapMocapMinusActualComMagnitude`, and
-`mocapMocapMinusActualComMean` beside it — a floor in the mean is a *bias*, not noise.
+a **gold** sphere at the mocap CoM, a **green** one at the simulation's, and a translucent **cyan
+ghost** of Alex at the pose the markers reconstruct. They overlap when things are right. Plot
+`mocapMocapMinusActualComMagnitude`, and `mocapMocapMinusActualComMean` beside it — a floor in
+the mean is a *bias*, not noise.
+
+The ghost is a **`YoGraphicRobotDefinition`, not a second simulated robot.** `scs.addRobot` would
+hand it to the physics engine, which would integrate it: it would fall through the floor between
+the ticks that pose it and collide with the robot it is drawn over. A `YoGraphicRobotDefinition`
+is pure visualisation — SCS2 reads the pose out of YoVariables (`mocapGhostPosition`,
+`mocapGhostOrientation`, `mocapGhost_<joint>`) and draws the meshes. That is also why the offline
+`GroundTruthSessionVisualizer` *can* use `addRobot`: it runs on a do-nothing physics engine, and
+this track does not. Its `RobotDefinition` is a **copy** — `AlexRobotModel.getRobotDefinition()`
+returns one cached instance, the same one the simulation is built from, so recolouring it in place
+would turn the real robot cyan too.
+
+**Marker placement is `SCATTERED`**, the same as `AlexLegDemo` — markers spread over each segment
+on an ellipsoidal shell, rather than patched onto one face of it. Measured over 15 s of walking at
+σ = 0.3 mm, planted layout, no occlusion:
+
+| placement | CoM error mean | sd | max | refused |
+|---|---|---|---|---|
+| `BRACKET` | 0.650 mm | 0.314 mm | 2.587 mm | 0 of 150171 |
+| **`SCATTERED`** | **1.452 mm** | **1.003 mm** | **7.754 mm** | 0 of 150163 |
+
+Scattering costs about 2.2× here, which is the same lever CLAUDE.md records for layout recovery
+(a scattered gauge cluster has 0.148 m mean radius against a bracket's 0.165 m). Note *where* that
+cost lands: it is a conditioning cost on the gauge, and this track runs on the **planted** layout
+with no calibration step, so what you are seeing is the runtime F6 pose error alone. Switch
+`MARKER_PLACEMENT` back to `BRACKET` before quoting anything about a calibrated Alex.
 
 **Two caveats, both encoded in the code rather than left to the reader.** The runtime is given
 the *planted* layout, so this is F6–F9 with calibration error set to zero (a calibrated layout
 adds ~2.86 mm on Alex at a 140 mm gauge bracket). And the mocap chain shares the simulation's
 URDF, so link masses and link-CoM offsets agree by construction — which F11 measured as the
 *dominant* real-world terms (mass 4.90 mm / link-CoM 2.73 mm / mocap 0.164 mm). Weigh the robot.
+
+### G5 — the mass-model guard
+
+`MassConsistencyGate` checks the URDF's mass model against ground reaction forces, which measure
+the same body the URDF describes. Two findings, because one number confounds two faults:
+
+| finding | what it catches | threshold |
+|---|---|---|
+| `total mass` | robot does not weigh what the model says | `massUncertaintyFraction × M` (5 % ⇒ ~4.5 kg) |
+| `mass distribution x`/`y` | mass in the wrong **place** | `3 × expectedComUncertainty` (F11's 4.90 mm ⇒ 14.7 mm) |
+
+Both are needed, because **scaling every link mass by a constant leaves the CoM exactly
+unchanged** — `c = Σmᵢrᵢ / Σmᵢ` is a weighted average and a common factor cancels. Total mass is
+the one degree of freedom the CoM cannot see. A model rescaled to match the scales still reports a
+perfect total and can be centimetres wrong about where the mass sits.
+
+Run it standing — a walking robot has no quasi-static samples:
+
+```bash
+../gradlew alexMocapGroundTruthTrack -Dmocap.headless=true -Dmocap.walk=false -Dmocap.duration=8.0
+../gradlew alexMocapGroundTruthTrack ... -Dmocap.massFault=1.0 -Dmocap.massFaultLink=LEFT_THIGH
+```
+
+`-Dmocap.massFault` perturbs the **mocap model only**; the simulation keeps its true mass and so
+keeps producing true contact forces. That asymmetry is the hardware situation reproduced exactly.
+
+**Measured, 8 s standing, model mass 90.540 kg** (the SDK V2 model the track builds — 0.973 kg
+lighter than the vendored URDF's 91.513 kg, which is precisely the hand/finger mass the controller
+model leaves out):
+
+| injected fault | Δmass | CoP offset x | CoP offset y | verdict |
+|---|---|---|---|---|
+| none (control) | 0.06 kg | 0.1 mm | 0.0 mm | **PASS** |
+| `TORSO_LINK` +20 % | 4.44 kg | 1.4 mm | 0.0 mm | **PASS — missed** |
+| `LEFT_SHOULDER_Z_LINK` +100 % | 3.12 kg | 4.0 mm | 10.5 mm | **PASS — missed** |
+| `LEFT_THIGH` +100 % | 8.28 kg | 5.4 mm | 11.3 mm | **FAIL** (on total mass) |
+
+Read that table carefully, because the interesting rows are the misses.
+
+**A static CoP compares horizontal positions, so it is blind to mass sitting over the support.**
+The measured lever arms at a neutral stance are `TORSO_LINK` **0.03 m**, `LEFT_THIGH` 0.14 m,
+`LEFT_SHOULDER_Z_LINK` 0.32 m. Since
+
+```
+CoP offset  ≈  (m_error / M) × lever
+```
+
+clearing the 14.7 mm bar needs `m_error/M ≈ 0.049 × (0.3 m / lever)` — about **4.7 kg on a 0.3 m
+lever, but 47 kg on the torso's 0.03 m**. The torso is simultaneously Alex's heaviest link, the
+only one the SDK's V1 and V2 models disagree about (by 10.7 kg), and the one this gate can barely
+see. That is not a defect in the gate, it is the geometry, and it is the same shape as this
+project's identifiability finding: **the posture has to give the suspect link a lever arm, or no
+amount of data will indict it.** Lean the robot forward and the torso acquires one — run the check
+at several postures, exactly as A′ needs joint excursion.
+
+Two consequences worth acting on:
+
+1. **The total-mass check is the sensitive one for a gross error.** A 17.5 kg discrepancy (the
+   "74 kg" figure) fires it immediately at 19 % against a 5 % bar. Weigh the robot first; it is one
+   number and it catches the fault the CoM cannot.
+2. **The distribution threshold is set by the model uncertainty already admitted, not by
+   measurement noise.** The arm fault's 10.5 mm offset sits against a 1.16 mm sd over 78 000
+   samples — statistically overwhelming, and still inside a bar that says "we already told you the
+   model might be 4.9 mm wrong". If you want the gate to indict smaller faults, the honest move is
+   to *justify a tighter `expectedComUncertainty`* by measuring masses, not to lower the threshold.
+
+### Watch out for — the SCS2 track
+
+1. **SCS2 does not simulate in Euclid's world frame.** `SimulationSession.DEFAULT_INERTIAL_FRAME`
+   is `ReferenceFrameTools.constructARootFrame("worldFrame")` — a **second root**, in its own tree,
+   named confusingly like Euclid's `World`. Euclid refuses to transform between separate roots, so
+   building the mocap tree or a `CenterOfMassCalculator` on `ReferenceFrame.getWorldFrame()` throws
+   on the first control tick:
+
+   ```
+   RuntimeException: Frames do not have same roots. this = PELVIS_LINKCoM, referenceFrame = World
+   ```
+
+   Everything in the track hangs off `scs.getInertialFrame()` instead — the mocap model instance,
+   the `GravityAlignedWorldFrame`, and the CoM calculator. Both roots are identity, so it is
+   tempting to bridge them by re-labelling coordinates; don't. That assumption is invisible at the
+   call site and becomes wrong the day a session is built with a non-default inertial frame.
+
+2. **`automaticallyStartSimulation` defaults to `false`.** With a window you press play. Headless
+   there is nobody to press it, and the run sits at `t = 0` looking like a hang. The track sets it
+   from the headless flag.
+
+3. **`SCS2AvatarSimulation.destroy()` calls `System.exit`.** Putting it in a `finally` will kill
+   the JVM before an exception on the way out ever reaches the default handler, so a failed headless
+   run prints nothing and exits 0. The track prints the stack trace itself before destroying.
 
 ### Using it as a library
 

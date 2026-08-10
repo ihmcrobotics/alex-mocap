@@ -437,10 +437,14 @@ spelling in a *comment* only. If bare meshes ever come back, that is the thread 
   window opens, Alex draws with full meshes, and the pelvis triad and CoM sphere are in place. The
   remaining nit is that the CoM sphere sits *inside* the pelvis mesh, so it is hard to find until
   you hide the robot's visuals in the SCS2 tree.
-- **The SCS2 track is written but not compiled.** `integration/AlexMocapGroundTruthTrack.java` plus
-  `integration/README.md`; it needs three edits in the `alex` repo (an `includeBuild`, a dependency,
-  a file copy) that were deliberately not applied. APIs were checked with `javap` against
-  17-0.33.2, but nothing has been through a compiler.
+- ~~**The SCS2 track is written but not compiled.**~~ Wired and running as of the
+  `mocap/walking-test` branch: the three edits are applied, Alex walks with `walkCSG` +
+  `ignoreWalkInputProviderCSG`, the cyan ghost draws as a `YoGraphicRobotDefinition`, and
+  `-Dmocap.headless=true` runs it over SSH. The live copy is
+  `alex/src/main/java/us/ihmc/alex/simulation/AlexMocapGroundTruthTrack.java`;
+  `integration/` is now a stale duplicate — **delete it or make it a pointer**, before someone
+  edits the wrong one. See RUNNING.md, *"Watch out for — the SCS2 track"*, for the frame-root trap
+  that cost the first day.
 - ~~`.idea/` is untracked and unignored on every branch.~~ Ignored as of PR5, along with `.claude/`.
 - G3 (`VolumeDistortionGate`) is still an empty placeholder — it needs a physical two-marker artifact.
 

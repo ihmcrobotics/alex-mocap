@@ -13,6 +13,7 @@ import us.ihmc.alexMocap.core.MarkerId;
 import us.ihmc.alexMocap.model.RobotModelHandle;
 import us.ihmc.alexMocap.registration.RegistrationResult;
 import us.ihmc.alexMocap.registration.RigidBodyRegistration;
+import us.ihmc.euclid.transform.RigidBodyTransform;
 import us.ihmc.euclid.tuple3D.Point3D;
 
 /**
@@ -107,6 +108,38 @@ public final class MarkerConstellation
    public static final double DEFAULT_GAUGE_STANDOFF = 0.18;
 
    /**
+    * Where a cluster's markers go on its segment.
+    * <p>
+    * This mirrors {@code RobotCaptures.MarkerPlacement}, which is the offline generator's copy in
+    * test scope. Two copies because the two draw from independently seeded streams and CLAUDE.md's
+    * standoff note is explicit that adding or moving a draw in either one silently re-poses every
+    * fixed-seed dataset that uses it. Keep them consistent in <i>geometry</i>, not by sharing code.
+    * </p>
+    */
+   public enum MarkerPlacement
+   {
+      /**
+       * Four markers in a patch on one face of the segment, as a bolted-on plate gives you. One
+       * azimuth per cluster, so the set shares a face.
+       */
+      BRACKET,
+      /**
+       * Markers spread over the whole segment, on an ellipsoidal shell around its centre of mass --
+       * lateral radius the standoff, axial radius half the segment. This is what taping markers onto
+       * a leg actually produces, and it is what {@code AlexLegDemo} uses.
+       */
+      SCATTERED
+   }
+
+   /**
+    * Axial half-length used for a link with no children to measure against, metres.
+    * <p>
+    * In a leg set that is only the feet. Everything else takes its half-length from the URDF.
+    * </p>
+    */
+   public static final double DEFAULT_TERMINAL_LINK_HALF_LENGTH = 0.10;
+
+   /**
     * A draw is rejected when {@code σ₂ < (spread · COLLINEARITY_FRACTION)²}.
     * <p>
     * One tenth of the spread is loose enough that rejections are rare at these cluster sizes -- so
@@ -196,6 +229,26 @@ public final class MarkerConstellation
                                             double gaugeStandoff,
                                             double limbStandoff)
    {
+      return random(model, markedLinks, seed, markersPerCluster, gaugeSpread, limbSpread, gaugeStandoff, limbStandoff, MarkerPlacement.BRACKET);
+   }
+
+   /**
+    * Draws a marker set with the placement given explicitly.
+    *
+    * @param placement {@link MarkerPlacement#BRACKET} keeps the historical draw byte-for-byte;
+    *                  {@link MarkerPlacement#SCATTERED} spreads each cluster over its segment.
+    * @see MarkerPlacement
+    */
+   public static MarkerConstellation random(RobotModelHandle model,
+                                            List<String> markedLinks,
+                                            long seed,
+                                            int markersPerCluster,
+                                            double gaugeSpread,
+                                            double limbSpread,
+                                            double gaugeStandoff,
+                                            double limbStandoff,
+                                            MarkerPlacement placement)
+   {
       if (model == null)
          throw new IllegalArgumentException("Model must not be null.");
       if (markedLinks == null || markedLinks.isEmpty())
@@ -257,13 +310,24 @@ public final class MarkerConstellation
 
          model.packCenterOfMassInLinkFrame(cluster.getLinkName(), linkCenterOfMass);
 
+         boolean scattered = placement == MarkerPlacement.SCATTERED;
+
          // One azimuth per cluster, applied perpendicular to the limb's long axis: the markers share
          // one face, the way a bracket does. An offset along the long axis would put the thigh's
          // markers near the knee -- which calibrates perfectly well and is wrong.
-         double azimuth = 2.0 * Math.PI * random.nextDouble();
+         //
+         // Drawn ONLY when a bracket is going to use it. An unconditional draw consumes a value from
+         // the stream and shifts every subsequent one, which would silently re-pose the robot and
+         // re-noise every marker in every fixed-seed dataset built on BRACKET. That is not
+         // hypothetical -- CLAUDE.md records it happening once already.
+         double azimuth = scattered ? 0.0 : 2.0 * Math.PI * random.nextDouble();
          double offsetX = CLUSTER_CENTROID_OFFSET.getX() + standoff * Math.cos(azimuth);
          double offsetY = CLUSTER_CENTROID_OFFSET.getY() + standoff * Math.sin(azimuth);
          double offsetZ = CLUSTER_CENTROID_OFFSET.getZ();
+
+         // Half the distance to the furthest child link -- the segment's own length as the URDF
+         // declares it, so a shin does not get a thigh's worth of markers.
+         double axialHalfLength = scattered ? halfSegmentLength(model, cluster.getLinkName(), DEFAULT_TERMINAL_LINK_HALF_LENGTH) : 0.0;
 
          Point3D[] constellation = new Point3D[cluster.getMarkerCount()];
 
@@ -271,9 +335,30 @@ public final class MarkerConstellation
          {
             for (int j = 0; j < constellation.length; j++)
             {
-               constellation[j] = new Point3D(linkCenterOfMass.getX() + offsetX + spread * (random.nextDouble() - 0.5),
-                                              linkCenterOfMass.getY() + offsetY + spread * (random.nextDouble() - 0.5),
-                                              linkCenterOfMass.getZ() + offsetZ + spread * (random.nextDouble() - 0.5));
+               if (scattered)
+               {
+                  // A uniformly random direction on a shell, scaled anisotropically: lateral radius
+                  // is the standoff, axial radius is half the segment. cos(polar) is drawn uniform
+                  // in [-1, 1] rather than the polar angle itself, or the draws bunch at the ends of
+                  // the segment. A little radial jitter because real markers do not sit on an
+                  // exact ellipsoid.
+                  double cosPolar = 2.0 * random.nextDouble() - 1.0;
+                  double markerAzimuth = 2.0 * Math.PI * random.nextDouble();
+                  double sinPolar = Math.sqrt(Math.max(0.0, 1.0 - cosPolar * cosPolar));
+                  double radialScale = 1.0 + 0.15 * (random.nextDouble() - 0.5);
+
+                  constellation[j] = new Point3D(linkCenterOfMass.getX() + CLUSTER_CENTROID_OFFSET.getX()
+                        + radialScale * standoff * sinPolar * Math.cos(markerAzimuth),
+                                                 linkCenterOfMass.getY() + CLUSTER_CENTROID_OFFSET.getY()
+                                                       + radialScale * standoff * sinPolar * Math.sin(markerAzimuth),
+                                                 linkCenterOfMass.getZ() + CLUSTER_CENTROID_OFFSET.getZ() + radialScale * axialHalfLength * cosPolar);
+               }
+               else
+               {
+                  constellation[j] = new Point3D(linkCenterOfMass.getX() + offsetX + spread * (random.nextDouble() - 0.5),
+                                                 linkCenterOfMass.getY() + offsetY + spread * (random.nextDouble() - 0.5),
+                                                 linkCenterOfMass.getZ() + offsetZ + spread * (random.nextDouble() - 0.5));
+               }
             }
 
             if (secondCovarianceEigenvalue(registration, result, constellation) >= minimumSigma2)
@@ -293,6 +378,39 @@ public final class MarkerConstellation
       }
 
       return new MarkerConstellation(markers, clusters, layouts, resampleCount);
+   }
+
+   /**
+    * Half the distance from a link's frame to its furthest child link's frame, metres.
+    * <p>
+    * That distance <b>is</b> the segment length: Alex's link origins sit on their parent joint's
+    * axis, so {@code LEFT_THIGH}'s frame is at the hip and its child {@code LEFT_SHIN}'s is at the
+    * knee. Taking it from the model rather than from a table means the scatter follows whatever URDF
+    * is loaded.
+    * </p>
+    * <p>
+    * The <b>maximum</b> over children, not the mean: IMU and sensor stubs are children too and sit
+    * almost on top of their parent, so a mean would be dragged to zero by every massless stub bolted
+    * to the segment.
+    * </p>
+    *
+    * @param fallback used for a link with no children at all -- only the feet, in a leg set.
+    */
+   private static double halfSegmentLength(RobotModelHandle model, String linkName, double fallback)
+   {
+      RigidBodyTransform childToLink = new RigidBodyTransform();
+      double furthest = 0.0;
+
+      for (String candidate : model.getLinkNames())
+      {
+         if (!linkName.equals(model.getParentLinkName(candidate)))
+            continue;
+
+         model.packLinkToLink(candidate, linkName, childToLink);
+         furthest = Math.max(furthest, childToLink.getTranslation().norm());
+      }
+
+      return furthest > 0.0 ? 0.5 * furthest : fallback;
    }
 
    /**

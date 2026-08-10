@@ -12,7 +12,10 @@ import us.ihmc.alexMocap.core.CalibrationResultIO;
 import us.ihmc.alexMocap.core.ClusterLayout;
 import us.ihmc.alexMocap.core.CsvEncoderLog;
 import us.ihmc.alexMocap.core.EncoderSample;
+import us.ihmc.alexMocap.frames.GravityAlignedWorldFrame;
+import us.ihmc.alexMocap.frames.TiltMeasurement;
 import us.ihmc.alexMocap.mocap.MocapFrameRecorder;
+import us.ihmc.euclid.referenceFrame.ReferenceFrame;
 import us.ihmc.euclid.transform.RigidBodyTransform;
 import us.ihmc.euclid.tuple3D.Point3D;
 import us.ihmc.euclid.tuple4D.Quaternion;
@@ -113,6 +116,9 @@ public class AlexLegDemo
     */
    private static final double GANTRY_HEIGHT = 1.4;
 
+   /** The floor tilt the demonstration tells the pipeline about, degrees. F8's plate reading. */
+   private static final double WORLD_TILT_DEGREES = 0.08;
+
    /**
     * How far the clusters stand off sideways from each link's centre of mass, metres.
     * <p>
@@ -145,6 +151,13 @@ public class AlexLegDemo
       // FRAMEWORK.md §1 literally asks for and it conditions the fit best, but it puts the robot in
       // postures no operator would command -- a foot 0.60 m forward and 0.18 m below the pelvis.
       boolean fullRange = List.of(args).contains("--full-range");
+
+      // Gate failures do not stop the demonstration by default. That is a deliberate,
+      // temporary-feeling choice and the banner says so: G2's expected-spread model does not yet
+      // cover scattered clusters, so a run that is working fine still exits non-zero. The EXIT CODE
+      // is still non-zero either way -- only the early stop is suppressed -- so nothing automated
+      // starts believing a failed gate passed.
+      boolean strict = List.of(args).contains("--strict");
 
       Files.createDirectories(outputDirectory);
 
@@ -201,7 +214,7 @@ public class AlexLegDemo
       System.out.println("-".repeat(78));
 
       int calibrationExit = CalibrationRunner.run(new String[] {"--calibrate", "--input", path(outputDirectory, "capture.csv"), "--encoders",
-            path(outputDirectory, "encoders.csv"), "--urdf", modelUrdf.toString(), "--sigma", Double.toString(SIGMA), "--world-tilt", "0.08",
+            path(outputDirectory, "encoders.csv"), "--urdf", modelUrdf.toString(), "--sigma", Double.toString(SIGMA), "--world-tilt", Double.toString(WORLD_TILT_DEGREES),
             "--output", path(outputDirectory, "calibration.json"), "--note", "AlexLegDemo"}, System.out, System.err);
 
       // BEFORE the exit check, deliberately. A gate failure is exactly when someone most wants to
@@ -212,10 +225,21 @@ public class AlexLegDemo
 
       if (calibrationExit != 0)
       {
-         System.err.println();
-         System.err.println("Calibration exited " + calibrationExit + " (a gate failed); not replaying.");
-         System.err.println("Read the layout-recovery table above before concluding anything from that.");
-         System.exit(calibrationExit);
+         System.out.println();
+         System.out.println("!".repeat(78));
+         System.out.println("A GATE FAILED (calibration exit " + calibrationExit + "). Replaying anyway.");
+         System.out.println();
+         System.out.println("  A gate failure is exactly when you want to see the result, not be denied it --");
+         System.out.println("  and on a scattered marker set G2 currently fails on magnitude while reporting");
+         System.out.println("  that it found no structure (CLAUDE.md, 'Scattered markers work; G2's");
+         System.out.println("  expected-spread model does not cope'). Read the layout-recovery table above and");
+         System.out.println("  the pelvis drift below before concluding anything from the gate.");
+         System.out.println();
+         System.out.println("  --strict restores the old behaviour of stopping here.");
+         System.out.println("!".repeat(78));
+
+         if (strict)
+            System.exit(calibrationExit);
       }
 
       // ---- 3. replay, and open the window ----------------------------------------------------
@@ -235,7 +259,7 @@ public class AlexLegDemo
                                                     "--output-directory",
                                                     outputDirectory.toString(),
                                                     "--world-tilt",
-                                                    "0.08",
+                                                    Double.toString(WORLD_TILT_DEGREES),
                                                     "--sigma",
                                                     Double.toString(SIGMA),
                                                     "--velocity",
@@ -269,9 +293,12 @@ public class AlexLegDemo
       System.out.println("  conditioning.csv    per-frame sigma3 and visible count, per cluster");
       System.out.println("=".repeat(78));
 
+      reportPelvisDrift(outputDirectory, WORLD_TILT_DEGREES);
+
       // ReplayRunner exits 1 when any frame was refused. On the degenerate run that is expected and
-      // is the point being made, so do not dress it up as success either way.
-      System.exit(replayExit);
+      // is the point being made, so do not dress it up as success either way -- and a gate that
+      // failed earlier still shows up here, even though it no longer stopped the run.
+      System.exit(Math.max(calibrationExit, replayExit));
    }
 
 
@@ -331,6 +358,106 @@ public class AlexLegDemo
       System.out.printf("  overall RMS %.4f mm, worst %.4f mm (%s)%n", 1000.0 * Math.sqrt(sumSquared / count), 1000.0 * worst, worstMarker);
       System.out.println("  This is layout error. The report's in-sample RMS above is a different, larger");
       System.out.println("  quantity -- it carries the base-pose fit residual too, and is not an accuracy claim.");
+   }
+
+   /**
+    * How far the reconstructed pelvis sits from the planted one, per frame -- <b>the drift the ghost
+    * is drawing</b>.
+    * <p>
+    * Worth a number as well as a picture: at this accuracy the ghost and the solid robot overlap to
+    * within a line width, so the view says "it works" and cannot say how well. This is the same
+    * comparison the ghost makes, in millimetres.
+    * </p>
+    * <p>
+    * It is a <b>pose</b> error, not a layout error: it carries the calibration's layout error, the
+    * per-frame marker noise through F6's registration of the gauge, and the world-tilt correction.
+    * The layout-recovery table earlier is the calibration on its own.
+    * </p>
+    */
+   private static void reportPelvisDrift(Path directory, double worldTiltDegrees) throws Exception
+   {
+      List<double[]> measured = readPoseCsv(directory.resolve("pelvis.csv"));
+      List<double[]> truth = readPoseCsv(directory.resolve("truthBase.csv"));
+
+      // pelvis.csv is in the gravity-aligned world; the planted poses are in the motive world. The
+      // demonstration feeds the pipeline a 0.08 deg floor tilt, and at a 1.4 m gantry height that
+      // is about 2 mm of pure frame convention. Differencing the two directly would report it as
+      // drift, which is the sort of number that gets quoted and is not an error at all.
+      GravityAlignedWorldFrame world = new GravityAlignedWorldFrame(TiltMeasurement.fromTiltAngles(Math.toRadians(worldTiltDegrees),
+                                                                                                    0.0,
+                                                                                                    TiltMeasurement.Method.PRECISION_LEVEL,
+                                                                                                    "AlexLegDemo"),
+                                                                     ReferenceFrame.getWorldFrame(),
+                                                                     "_drift");
+      RigidBodyTransform motiveToGravityAligned = new RigidBodyTransform();
+      world.getMotiveWorld().getTransformToDesiredFrame(motiveToGravityAligned, world.getGravityAlignedWorld());
+
+      for (double[] row : truth)
+      {
+         Point3D point = new Point3D(row[0], row[1], row[2]);
+         motiveToGravityAligned.transform(point);
+         row[0] = point.getX();
+         row[1] = point.getY();
+         row[2] = point.getZ();
+      }
+
+      if (measured.isEmpty() || measured.size() != truth.size())
+      {
+         System.out.println();
+         System.out.println("pelvis drift: not reported (" + measured.size() + " estimated poses against " + truth.size() + " planted).");
+         return;
+      }
+
+      double sumSquared = 0.0;
+      double worst = 0.0;
+      int worstFrame = -1;
+
+      for (int k = 0; k < measured.size(); k++)
+      {
+         double dx = measured.get(k)[0] - truth.get(k)[0];
+         double dy = measured.get(k)[1] - truth.get(k)[1];
+         double dz = measured.get(k)[2] - truth.get(k)[2];
+         double d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+         sumSquared += d * d;
+
+         if (d > worst)
+         {
+            worst = d;
+            worstFrame = k;
+         }
+      }
+
+      System.out.println();
+      System.out.println("pelvis drift -- reconstructed vs planted, which is what the ghost draws");
+      System.out.printf("  RMS  %.4f mm over %d frames%n", 1000.0 * Math.sqrt(sumSquared / measured.size()), measured.size());
+      System.out.printf("  max  %.4f mm at frame %d%n", 1000.0 * worst, worstFrame);
+      System.out.println("  Pose error, not layout error: it carries the layout error, the marker noise");
+      System.out.println("  through F6's gauge registration, and the world-tilt correction.");
+   }
+
+   /** {@code timestamp,x,y,z,qx,qy,qz,qs} rows, as {@code {x, y, z}}. */
+   private static List<double[]> readPoseCsv(Path file) throws Exception
+   {
+      List<double[]> rows = new ArrayList<>();
+
+      if (!Files.isRegularFile(file))
+         return rows;
+
+      for (String line : Files.readAllLines(file))
+      {
+         if (line.isBlank() || line.startsWith("#") || line.startsWith("timestamp"))
+            continue;
+
+         String[] columns = line.split(",");
+
+         if (columns.length < 4)
+            continue;
+
+         rows.add(new double[] {Double.parseDouble(columns[1]), Double.parseDouble(columns[2]), Double.parseDouble(columns[3])});
+      }
+
+      return rows;
    }
 
    private static void writeCaptureSession(Path directory, RobotCaptures.Planted planted) throws Exception

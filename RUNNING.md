@@ -276,7 +276,24 @@ export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 ./gradlew alexLegDemo --args="--degenerate"
 ./gradlew alexLegDemo --args="--sweep 0.6"             # wider leg swing about the rest pose
 ./gradlew alexLegDemo --args="--full-range"            # every joint across its whole URDF range
+./gradlew alexLegDemo --args="--strict"                # stop on a gate failure instead of replaying
 ```
+
+**A failed gate no longer stops the run.** With markers scattered over each link, G2 currently
+fails on magnitude while reporting that it found no structure — see CLAUDE.md, *"Scattered
+markers work; G2's expected-spread model does not cope"*. Stopping there would deny you the
+result exactly when you most want it, so the demo prints a loud banner and replays anyway. The
+**exit code is still non-zero**, so nothing automated mistakes it for a pass; `--strict` restores
+the old behaviour.
+
+Two numbers get printed that only a synthetic session can produce:
+
+- **layout recovery** against the planted `^i p_ij` — currently 1.078 mm RMS, 1.676 mm worst.
+  This is the calibration on its own, and it is *not* the report's in-sample RMS (5.2 mm), which
+  also carries the base-pose fit residual and says so.
+- **pelvis drift** — reconstructed vs planted base pose, which is what the ghost draws: currently
+  **1.727 mm RMS, 3.926 mm max**. Tilt-corrected, so the 0.08° floor tilt (worth ~2 mm at gantry
+  height) is not being reported as error.
 
 Or open `src/test/java/us/ihmc/alexMocap/AlexLegDemo.java` in IntelliJ and hit the green arrow
 on `main`. (The Gradle task exists because the demo is in **test** scope — `run` uses the main

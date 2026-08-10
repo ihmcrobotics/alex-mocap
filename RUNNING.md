@@ -162,8 +162,79 @@ written logs agree on — and the worst timestamp skew is printed. FRAMEWORK §1
 mispairing is valid mocap plus valid encoders at the wrong configuration, and nothing else
 about it looks wrong.
 
-`us.ihmc.alexMocap.ReplayRunner` (PR3) is still an empty placeholder, as is everything under
-`runtime`, `postprocess`, `scs2`, and the G3 gate.
+### `ReplayRunner` — the runtime pass (PR3)
+
+Consumes a logged capture plus a `CalibrationResult`, runs F6 → F7 → F9 → F10, and writes
+`com.csv`, `pelvis.csv` and `conditioning.csv`.
+
+```bash
+java -cp "build/install/alex-mocap/lib/*" us.ihmc.alexMocap.ReplayRunner \
+    --input       capture.csv \
+    --encoders    encoders.csv \
+    --urdf        robot.urdf \
+    --calibration calibration.json \
+    --output-directory out/ \
+    --world-tilt  0.08 \
+    --velocity --error-budget
+```
+
+Sample output (the same 30 synthetic captures, after `--calibrate`):
+
+```
+links        7 total, 7 marked, 0 chained
+chained mass 0.000 of 28.000 kg on encoders (FRAMEWORK.md section 10)
+world tilt   TiltMeasurement[PRECISION_LEVEL, θ=0.0800°, --world-tilt]
+
+Conditioning over 30 frames (30 with every link accepted, 100.0%)
+  link          accept%    below 3     worst s3      mean s3   visible-count histogram
+  pelvis         100.0%          0    1.264e-04    1.299e-04   0:0 1:0 2:0 3:0 4:30
+  l_thigh        100.0%          0    4.452e-06    5.301e-06   0:0 1:0 2:0 3:0 4:30
+  l_shank        100.0%          0    9.863e-10    2.307e-08   0:0 1:0 2:0 3:0 4:30
+  ...
+
+velocity second pass (FRAMEWORK.md section 13)
+  window          SGDifferentiator[21 samples (0.105 s), degree 2, noise gain 7.21 /s]
+  edge samples    10 at each end are NaN; a centred window has no value there
+  expected noise  0.00216 m/s at sigma = 0.3000 mm
+  ContactNet bar  0.0844 / 0.0254 m/s
+
+CoM error budget (FRAMEWORK.md section 14)
+  mass error x lever arm        4.098 mm   (CAD)
+  link-CoM error                4.033 mm   (CAD)
+  pose error (mocap)            0.242 mm   <- the only one this pipeline controls
+  dominant term              mass
+  perfect mocap would buy    1.00x
+  NOTE: the CoM is as good as the URDF, not as good as the mocap.
+```
+
+Exit codes: `0` every frame produced a CoM, `1` **at least one frame was refused**, `2`
+usage or I/O error. A refused link means there is no CoM for that frame — not a slightly
+worse one — so it is a failure rather than a footnote.
+
+Two things in that output are worth reading rather than skimming. `l_shank`'s worst `σ₃` is
+`9.9e-10` against `1e-4` for the others: that cluster is near-**coplanar**, which is fine and
+is why the refusal guard is `σ₂` (see *Gotchas*). And the error budget prints §14's
+conclusion outright — the CAD terms are 17× the mocap term, so perfect mocap would buy 1.00×.
+
+### The visualizer
+
+```bash
+java -cp "build/install/alex-mocap/lib/*" us.ihmc.alexMocap.ReplayRunner ... --visualize
+```
+
+Opens SCS2 on the computed trajectory: the robot at each logged configuration, a gold CoM
+sphere, the pelvis coordinate system, and every conditioning variable available to plot.
+Needs a display. It replays rather than simulates — the session is built with
+`newDoNothingPhysicsEngineFactory()`, so nothing integrates the robot forward and overwrites
+the poses being inspected.
+
+**It has no test, by design** (PR_PLAN: "if a JavaFX window does not appear you will know
+within seconds"). It is also the only class in the project that touches JavaFX, and
+`PackageDependencyTest` enforces that so the rest stays runnable over SSH.
+
+The G3 gate (`VolumeDistortionGate`) is still an empty placeholder — it needs a rigid
+two-marker artifact carried through the volume, which is a hardware procedure rather than a
+software one.
 
 ## What is implemented
 
@@ -469,6 +540,80 @@ world, so `changeFrame(Wg)` *is* the correction and cannot be half-applied.
    branch, elasticity on every loaded branch at once.
 10. **G4 does not show the asymmetry PR_PLAN describes.** See *Gotchas*.
 
+### `us.ihmc.alexMocap.runtime` — F6, F7, F9, F10
+
+| Type | Role |
+|---|---|
+| `MeasuredLinkPoses` | per-link pose + source + conditioning + refusal reason |
+| `LinkPoseEstimator` | F6: register the layout against live markers. Owns the refusal policy |
+| `KinematicChainCoupler` | F7: chain unmarked links from a marked ancestor |
+| `CenterOfMassGroundTruth` | F9: the mass-weighted sum, in `Wg` |
+| `PelvisStateExtractor` | F10: pelvis pose. **No velocity accessor** |
+
+### Watch out for — `runtime`
+
+1. **The refusal guard is `σ₂`, not `σ₃`.** FRAMEWORK §9 and §18.1 both say `σ₃`. Refusing
+   on `σ₃` rejects the normal case — see *Gotchas*.
+2. **A chained pose and a measured pose are not interchangeable, and the transform does not
+   say which.** Read `MeasuredLinkPoses.getSource()`. `KinematicChainCoupler.getChainedMass()`
+   is the number §10's trade is actually made against: if a large fraction of the robot is
+   chained, the CoM is an FK result wearing a mocap costume.
+3. **A refused ancestor takes everything below it.** One near-collinear pelvis cluster
+   removes every chained link from that frame. That is correct, and it means a single bad
+   cluster can cost a whole frame's CoM.
+4. **`CenterOfMassGroundTruth.compute` returning `false` means there is NO CoM**, and it packs
+   NaN. It does not return the CoM of a lighter robot. Check the return value;
+   `getMissingMass()` tells you the size of what was unmeasurable, in kilograms.
+5. **F9 applies the F8 tilt correction itself.** Do not apply it again at the call site.
+6. **`PelvisStateExtractor` must never grow a velocity accessor.** A reflection test enforces
+   it against names *and* return types. If you need velocity, it is `postprocess`, offline.
+
+### `us.ihmc.alexMocap.postprocess` — the second pass and the budget
+
+| Type | Role |
+|---|---|
+| `SGDifferentiator` | centred Savitzky-Golay first derivative, zero-lag by construction |
+| `PelvisTwistEstimator` | linear + angular velocity over a logged pose trajectory |
+| `COMErrorBudget` | F11's three terms |
+| `ErrorBudgetReport` | which term dominates, and what perfect mocap would buy |
+
+Depends on `core` and nothing else — F11 is arithmetic on arrays the caller assembles, so it
+does not reach for a robot model to do it.
+
+### Watch out for — `postprocess`
+
+1. **The differentiator's input is the pelvis *pose* noise, not the marker noise.** F6
+   registers four markers into one pose, so `σ_pose ≈ σ/√N`. FRAMEWORK §17's 0.0037 m/s only
+   comes out that way; fed the raw 0.93 mm the same window gives 0.0067 m/s. Use
+   `getNoiseGain() × σ_pose` to choose a window rather than guessing.
+2. **Edges are NaN and must stay NaN.** A one-sided window at the ends would reintroduce
+   exactly the lag the filter exists to avoid, at the samples nobody scrutinises.
+3. **Degree 2 buys nothing over degree 1 for a first derivative.** The quadratic term is even
+   and cannot influence an odd coefficient. The useful choices are 2 and 3.
+4. **§14's first term assumes `Σδm_i = 0`** — the total pinned by a scale reading.
+   `packShiftFromMassErrors` checks it and throws otherwise; use
+   `packExactShiftFromMassErrors` for the unpinned case.
+5. **Angular velocity comes from `vee(skew(Ṙ Rᵀ))`.** Watch `getWorstNonSkewResidual()`: a
+   large value means the pose log is noisy enough that the rotations are not staying on SO(3)
+   through the filter, which is a data problem, not a filter one.
+
+### `us.ihmc.alexMocap.scs2` — telemetry and the view
+
+`GroundTruthYoVariables` (CoM, pelvis pose, per-link `σ₃`/visible/accepted),
+`ConditioningMonitor` (session histograms — headless, and what §20.4 sends you to the gantry
+to produce), `GroundTruthYoGraphics`, `GroundTruthSessionVisualizer`.
+
+### Watch out for — `scs2`
+
+1. **This is the only package allowed to touch JavaFX or YoVariables**, enforced by
+   `PackageDependencyTest` against the compiled classes.
+2. **`ConditioningMonitor` reports a histogram, not a minimum**, because §20.4's question is
+   *how often* — a cluster that dips to two markers for one frame in a thousand is a different
+   mounting problem from one that spends a third of the sweep there, and a minimum reports
+   them identically.
+3. **There is no velocity YoVariable, deliberately.** One named `pelvisLinearVelocity` would
+   be plotted against the estimator and would show 0.13 m/s of differencing noise.
+
 ### `us.ihmc.alexMocap.registration` — the primitive
 
 The registration primitive of FRAMEWORK.md §2, consumed by F5, F6, G1 and G4. Two classes:
@@ -534,6 +679,8 @@ Declared in `gradle/libs.versions.toml`, consumed in `build.gradle.kts`:
 | `us.ihmc:euclid-geometry` | 0.22.5 | `api` |
 | `us.ihmc:mecano` | 17-0.19.2 | `api` |
 | `us.ihmc:scs2-definition` | 17-0.30.0 | `implementation` |
+| `us.ihmc:ihmc-yovariables` | 0.13.6 | `implementation` |
+| `us.ihmc:scs2-session-visualizer-jfx` | 17-0.30.0 | `implementation` |
 | `org.ejml:ejml-core` | 0.39 | `implementation` |
 | `org.ejml:ejml-ddense` | 0.39 | `implementation` |
 | `org.junit.jupiter:junit-jupiter` | 5.10.2 | `testImplementation` |
@@ -564,6 +711,12 @@ deliberately not declared until PR3.
 It is `implementation`, not `api`, for the same reason as EJML: `URDFLoader` takes a `Path`
 and returns a Mecano `RigidBodyBasics`, so no SCS2 type reaches any signature anywhere in
 the project.
+
+**`scs2-session-visualizer-jfx` drags JavaFX 17.0.8** and arrives with PR3. It resolves fine
+on Linux and adds nothing to the test runtime, because nothing in the suite touches it — no
+test initialises a toolkit, and `PackageDependencyTest` confines both JavaFX and YoVariables
+to the `scs2` package by scanning compiled classes. That is the rule that keeps every other
+package runnable on a machine with no display.
 
 FRAMEWORK §19 used to say "nothing outside `scs2` imports `scs2`", and **nothing enforced
 it** — `PackageDependencyTest` only scanned `us/ihmc/alexMocap/` names, so it was blind to
@@ -686,6 +839,54 @@ has 90 parameters against 1680 observations. The absolute level is the signal he
 ratio. Getting the literal asymmetry would need the held-out split to cover configurations
 the training split did not — a better G4 design, and not implemented.
 
+### Refuse on `σ₂`, not `σ₃`. `σ₃ ≈ 0` is the normal case.
+
+FRAMEWORK §9 and §18.1 both say to log `σ₃` and refuse below a threshold on it. Logging it is
+right; **refusing on it rejects good data.** Writing the marker cloud's covariance eigenvalues
+as `λ₁ ≥ λ₂ ≥ λ₃`:
+
+| shape | `σ₂` | `σ₃` | pose determined? |
+|---|---|---|---|
+| generic | > 0 | > 0 | yes |
+| **coplanar** — markers on a flat link face | > 0 | ≈ 0 | **yes** |
+| collinear | ≈ 0 | ≈ 0 | no |
+
+Three non-collinear points already fix a 6-DOF pose, so a plane is entirely sufficient. §2
+says as much in passing — "a noisy or near-planar cluster — the realistic case, markers on a
+flat link face" — which makes the two sections quietly inconsistent. What genuinely destroys
+a pose is collinearity, and that is `σ₂`.
+
+The cost of conflating them is not theoretical. The toy's `l_shank` cluster came out
+near-coplanar with a nominal `σ₃` of `3.1e-08 m²` — an out-of-plane extent of 0.17 mm, *below
+the 0.3 mm mocap noise*. Its `σ₃` then fluctuated with the noise and refused roughly **one
+frame in six** of a replay where every pose was fine. Its `σ₂` was four orders of magnitude
+larger and perfectly steady. You can see both in the `ReplayRunner` conditioning table above.
+
+`σ₃` is still computed and logged every frame per §9 — it measures how planar a cluster is,
+which is worth watching because that is where the Umeyama reflection guard earns its keep.
+
+### F9 cannot be Mecano's `CenterOfMassCalculator`, but Mecano is the right oracle
+
+§12 says "Mecano's `CenterOfMassCalculator` implements this. Do not reimplement it; feed it
+the measured poses." It computes from the tree's own frames, which are a function of a joint
+configuration — and independently measured link poses are in general consistent with **no**
+joint configuration. That inconsistency is the signal the whole method exists to expose;
+feeding the calculator a joint configuration instead would make F9 an FK result measuring the
+URDF rather than the robot.
+
+So the sum is written out directly, and Mecano's calculator is the **test oracle**: on data
+where the measured poses *are* FK-consistent, the two must agree to `1e-9`. They do. That is
+stronger as a test than it would have been as an implementation, because the two paths share
+no code.
+
+### §17's 0.0037 m/s is a pose-noise figure, not a marker-noise one
+
+F6 registers four pelvis markers into one pose, so what reaches the differentiator is
+`σ/√N ≈ 0.47 mm`, not the raw 0.93 mm. That distinction is invisible in §13's prose and is a
+factor of two in the headline number: fed pose noise, a 0.1 s centred window at 200 Hz gives
+0.0034 m/s and meets PR_PLAN's 0.005 target; fed raw marker noise it gives 0.0067 m/s and does
+not. Use `SGDifferentiator.getNoiseGain() × σ_pose` to size a window rather than guessing.
+
 ## Tests
 
 JUnit 5 (`5.10.2`), run on the JUnit Platform.
@@ -700,7 +901,7 @@ Reports land in `build/reports/tests/test/index.html`; machine-readable results 
 `build/test-results/test/*.xml`. `testLogging` is configured to dump full stack traces on
 failure, so a CI log is enough to diagnose without fetching the report.
 
-Currently 118 tests, no external resources, no display, no hardware:
+Currently 148 tests, no external resources, no display, no hardware:
 
 | Class | Covers |
 |---|---|
@@ -716,7 +917,12 @@ Currently 118 tests, no external resources, no display, no hardware:
 | `calibration.PlantAndRecoverTest` | noiseless K=5 exact to 4.6e-15 m, realistic and today's-lab noise, **J monotone across every half-step over 4 seeds**, convergence and determinism, 20% occlusion with `K_ij` bookkeeping, never-seen marker stays NaN, frozen legs leave the base step ill-conditioned, the gauge-cluster scaling law and error decomposition |
 | `gates.GateInjectionTest` | G2 passes clean, fires on a 0.5° offset and localises to the affected branch, is blind to a terminal-joint offset, fires on elastic deflection across both branches; G4 clean vs injected |
 | `CalibrateCliTest` | `--calibrate` end to end over two CSVs and a URDF, provenance round trip, unmeasured tilt warned about, gauge defaults to the base link, permuted joint order rejected, encoder CSV bit-exact round trip |
-| `PackageDependencyTest` | the FRAMEWORK.md §19 dependency table, by scanning compiled class files; plus SCS2 containment against the external library |
+| `runtime.RuntimeGroundTruthTest` | **CoM vs Mecano's own `CenterOfMassCalculator` to 1e-9**, F7 chaining exact with only the pelvis marked, refused-ancestor propagation, F8 injection and correction at the CoM, occlusion refusal, near-collinear refusal on `σ₂`, near-coplanar cluster accepted |
+| `runtime.PelvisStateExtractorTest` | no velocity or twist by reflection (names *and* return types), pose reported in `Wg`, refusal does not keep the last good pose |
+| `postprocess.SGDifferentiatorTest` | antisymmetric kernel, exact on polynomials to its own degree, degree-2 is the least-squares slope, velocity RMS under 0.005 m/s, **zero lag with a causal filter of equal width as control**, NaN edges |
+| `postprocess.COMErrorBudgetTest` | 1% mass perturbation against the closed form pinned and unpinned, link-CoM and pose terms, §14's conclusion that CAD dominates, and the flip side once inertials are measured |
+| `ReplayRunnerTest` | both CLIs end to end: capture → `--calibrate` → replay → CoM trajectory, NaN velocity edges, refused frame exits non-zero, unmeasured tilt visible |
+| `PackageDependencyTest` | the FRAMEWORK.md §19 dependency table, by scanning compiled class files; SCS2 containment against the external library; JavaFX and YoVariables confined to `scs2` |
 
 ### Reading the tests
 

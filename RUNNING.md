@@ -216,6 +216,55 @@ Two things in that output are worth reading rather than skimming. `l_shank`'s wo
 is why the refusal guard is `σ₂` (see *Gotchas*). And the error budget prints §14's
 conclusion outright — the CAD terms are 17× the mocap term, so perfect mocap would buy 1.00×.
 
+## The SCS2 mocap ground-truth track (PR5)
+
+Alex **walking**, with a simulated marker set on the legs, and the mocap-derived CoM drawn
+against the simulation's real one. This is the live demo; `AlexLegDemo` below is the offline
+replay it grew out of.
+
+It lives in the **`alex` repository**, next to `AlexFlatGroundWalkingTrack`, because it needs
+`AlexRobotModel` and the walking controller. The library half is finished here and tested; the
+track itself is in **`integration/`** and is **not yet applied** — see `integration/README.md`
+for the three edits (one `includeBuild`, one dependency, one file copy).
+
+Once wired:
+
+```bash
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+cd ~/workspaces/mocap/alex && ../gradlew compileJava
+# then green-arrow us.ihmc.alex.simulation.AlexMocapGroundTruthTrack from IntelliJ
+```
+
+`-Dmocap.occlusion=0.12` turns on occlusion; leave it off unless you want to see refusals.
+
+**On screen:** 28 marker spheres (four per link, coloured per cluster, yellow = pelvis gauge),
+a **gold** sphere at the mocap CoM and a **green** one at the simulation's. They overlap when
+things are right. Plot `mocapMocapMinusActualComMagnitude`, and
+`mocapMocapMinusActualComMean` beside it — a floor in the mean is a *bias*, not noise.
+
+**Two caveats, both encoded in the code rather than left to the reader.** The runtime is given
+the *planted* layout, so this is F6–F9 with calibration error set to zero (a calibrated layout
+adds ~2.86 mm on Alex at a 140 mm gauge bracket). And the mocap chain shares the simulation's
+URDF, so link masses and link-CoM offsets agree by construction — which F11 measured as the
+*dominant* real-world terms (mass 4.90 mm / link-CoM 2.73 mm / mocap 0.164 mm). Weigh the robot.
+
+### Using it as a library
+
+The pieces are usable without the walking track:
+
+| class | what it does |
+|---|---|
+| `sim.MarkerConstellation` | draws a randomised marker layout on chosen links |
+| `sim.SimulatedMocapCamera` | projects markers from live link poses; noise + occlusion |
+| `scs2.SimulatedMocapGroundTruth` | the whole chain, one `update()` per tick |
+| `scs2.MocapMarkerYoVariables` | the marker cloud as YoVariables + spheres |
+| `scs2.GroundTruthComparisonYoVariables` | mocap vs actual CoM, with running mean/sd |
+
+`SimulatedMocapGroundTruth` **owns and mutates** the `RobotModelHandle` it is given — it poses
+it from the encoders every tick. Give it its own instance, never the one your simulation poses.
+
+---
+
 ## Demonstration: the real Alex model
 
 ### Run it — one file, from IntelliJ
@@ -487,6 +536,33 @@ the poses being inspected.
 **It has no test, by design** (PR_PLAN: "if a JavaFX window does not appear you will know
 within seconds"). It is also the only class in the project that touches JavaFX, and
 `PackageDependencyTest` enforces that so the rest stays runnable over SSH.
+
+#### Meshes: `--mesh-dir`
+
+`package://` resolves against a directory whose *name* is the authority in the URI, and it does
+not have to sit beside the URDF. On Alex it does not — the URDF here is a vendored copy (pinned
+by sha256 in the provenance, so CI needs nothing external) and the meshes are in
+`ihmc-alex-sdk/alex-models/`. So the roots are named separately:
+
+```bash
+... --visualize --mesh-dir ~/workspaces/mocap/ihmc-alex-sdk/alex-models \
+                --mesh-dir ~/workspaces/mocap/ihmc_hands_ros2/meshes
+```
+
+`AlexLegDemo` finds both automatically via `AlexSdkModels`, which walks up from the working
+directory looking for a sibling `ihmc-alex-sdk` (override with `-Dalex.sdk.dir` or
+`$ALEX_SDK_DIR`). Omitting `--mesh-dir` falls back to the URDF's own directory — the old
+behaviour, still right for a model that ships its meshes with it.
+
+Measured on the vendored Alex URDF: **29 of its 37 `package://` references resolve under
+`alex-models/`** — every leg, pelvis and torso mesh. The remaining 8 are ability-hand hulls,
+which live in `ihmc_hands_ros2/meshes/`; without that second root the hands simply do not draw.
+
+An unresolvable mesh **does not throw**. It leaves `ModelFileGeometryDefinition.getFileName()`
+null, survives `RobotDefinition.newInstance()` (which never looks at geometry), and only becomes
+an NPE inside `SimulationSession.addRobot`. So the whole headless suite passes with every mesh
+broken — which is exactly what happened before. `MeshResolutionTest` counts resolved references
+instead, and skips (rather than fails) when the SDK is not beside this checkout.
 
 The G3 gate (`VolumeDistortionGate`) is still an empty placeholder — it needs a rigid
 two-marker artifact carried through the volume, which is a hardware procedure rather than a

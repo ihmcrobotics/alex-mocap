@@ -22,11 +22,20 @@ Pipeline stages are named `F1`–`F11` and gates `G1`–`G4`, matching `FRAMEWOR
 | `pr2` | [#2](https://github.com/ihmcrobotics/alex-mocap/pull/2) → `pr1` | `model` (F1), `frames` (F8), `calibration` (F2–F5, A′), G2, G4 |
 | `pr3` | [#3](https://github.com/ihmcrobotics/alex-mocap/pull/3) → `pr2` | `runtime` (F6–F10), `postprocess` (SG, F11), `scs2`, `ReplayRunner` |
 | `pr4-alex-demo` | none | the real-Alex leg-marker demonstration |
+| `mocap-sdk-model` | none | PR5: `sim`, SCS2 ground-truth track, SDK meshes, version alignment |
 
 **They are stacked.** Merge in order or GitHub retargets. PR4 has deliberately not been opened.
 
 Reports live in `.claude-reports/` on `pr4-alex-demo`: the overnight markdown report, an HTML
 visual summary, and the plan it was built from.
+
+### Where this repository lives
+
+`~/workspaces/mocap/alex-mocap`, inside an IHMC **repository group** (`isProjectGroup=true`,
+`compositeSearchHeight=0`) alongside `alex`, `ihmc-alex-sdk`, `ihmc_hands_ros2` and
+`ihmc-open-robotics-software`. It was moved there from `~/alex/alex-mocap` in August 2026 so that
+the SCS2 track can consume it through a composite build. Nothing should hard-code either path —
+`AlexSdkModels` walks up to find its siblings, which is why.
 
 ## Running it
 
@@ -133,6 +142,29 @@ whenever `g` lies along an axis every marked link merely rotates about.
 - **`σ₃` cannot separate them**: 8.79e-4 vs 2.21e-3 for an identifiable set (factor 2.5), while two
   *both-identifiable* sets differ by 26.
 
+### Four markers per cluster is not "three plus a spare" (measured, PR5)
+
+At a **12 %** independent per-marker drop rate over the seven-cluster leg set, **126 of 200 frames
+are refused — 63 %**. The naive arithmetic predicts 41 %: a four-marker cluster falls below three
+with probability `1 − 0.88⁴ − 4·0.12·0.88³ = 7.3 %`, so `1 − 0.927⁷ ≈ 41 %`.
+
+The gap is the `σ₂` guard. Losing one marker of four does not leave a comfortable three-point
+cluster — it removes a quarter of the constellation's spread, and `LinkPoseEstimator`'s threshold is
+`DEFAULT_SIGMA2_FRACTION = 0.25` of nominal `σ₂`. The ~6 % between the two numbers are clusters that
+had **enough markers and still could not be trusted**.
+
+Consequences: an occlusion budget computed from `MarkerCluster.MINIMUM_MARKERS` alone will be
+optimistic; five markers on the limbs buys more than the count suggests. And this is the *friendly*
+case — the simulated camera's occlusion is memoryless and per-marker, where a real dropout takes the
+same markers for many consecutive frames.
+
+**A refused marked link also orphans its unmarked descendants.** `KinematicChainCoupler` binds each
+unmarked link to its nearest marked ancestor **once, at construction**, so refusing `LEFT_SHIN` also
+refuses `LEFT_ANKLE_Y_LINK`: 6.39 kg leaves the sum, not 6.34. Losing one marked link costs that
+link *and everything unmarked beneath it*, which is not readable off the marked set. The CoM goes
+NaN rather than becoming the CoM of a robot missing a shin — marked links are never silently
+substituted by FK, which is the conservative branch and the right one.
+
 ### Other measured facts
 
 - **CoM vs Mecano's `CenterOfMassCalculator`: 1.1e-15 m** on FK-consistent poses. Two code paths
@@ -200,42 +232,80 @@ FOOT 0.810; TORSO 22.21.
 **The estimator's actual states are 9 joints:** `SPINE_Z` + both `HIP_X/Z/Y` + `KNEE_Y`. Ankles are
 measured inputs, not estimated. "The legs" is a good approximation but `SPINE_Z` is in there.
 
+### It is Alex **V2**, and it matches the SDK exactly (measured, PR5)
+
+The Python asset is not a separate model. Compared link-by-link against `ihmc-alex-sdk`:
+
+| against | shared lower-body links | mass mismatches |
+|---|---|---|
+| `alex_v1_description/urdf/alex_v1.lowerBody.urdf` | 23 | **1** (`TORSO_LINK` 22.21 vs 11.478) |
+| `alex_v2_description/urdf/alex_v2.lowerBody.urdf` | 23 | **0 — identical** |
+
+Every actuated leg-joint origin and axis is identical too; the only textual differences are tabs
+versus spaces. So the vendored URDF is the SDK's V2 lower body, and **every mass figure recorded in
+this file is a V2 figure**.
+
+That matters because `AlexFlatGroundWalkingTrack` builds `AlexVersion.getPhysicalRealityVersion()`,
+which returns `AlexV2Version.*` for both Alex001 and Alex002. The simulation and the mocap chain are
+therefore on the same model by construction — the SCS2 track needed no re-derivation of any number
+here. Had it been V1, `TORSO_LINK` alone would have moved by 10.7 kg, and torso mass is the single
+largest FK-posed term in the legs-only marker set.
+
+**Two things the Python copy has that the SDK does not.** Calibrated IMU mounting: its
+`*_HIP_X_IMU_JOINT` carry measured rpy (`-1.5803397 -0.0019308 1.570796` left) where the SDK has
+nominal (`-1.570796 0 1.570796`). And ability hands — Alex001 is `CYCLOID_FOREARMS` and Alex002 is
+`NUB_FOREARMS`, so the hand configuration in the vendored file matches neither robot. Neither
+affects the CoM work: IMU links carry no mass and are not marked, and the hands are far above the
+leg marker set. But the file is **not** redundant with the SDK, so do not delete it as a duplicate.
+
 ---
 
-## OPEN — in progress when this was written
+## OPEN
 
-### The visualizer renders no meshes (uncommitted work on `pr4-alex-demo`)
+### The visualizer meshes — resolution fixed, rendering still unconfirmed
 
-Fixed and verified so far: the two NPEs (items 3–4 above), mesh *resolution* (item 5 — dropped
-visuals went 56 → 24, the remaining 24 being ability-hand meshes genuinely absent from disk), and
-the blocking lifecycle (item 6 — headless run now blocks, exit 124, vs exiting 0 before).
+**What changed (PR5).** The mesh root is now named independently of the URDF:
+`GroundTruthSessionVisualizer.show(urdf, resourceDirectories, …)`, `ReplayRunner --mesh-dir`
+(repeatable), and `AlexSdkModels` to find `ihmc-alex-sdk` without an absolute path.
 
-**Still broken:** JavaFX itself fails to import every `.obj`:
+The real root cause was never the NPEs or the null ClassLoader — those were already fixed. It was
+that `package://` resolved against **exactly one** directory, the URDF's own parent, which forced a
+choice between a model whose bytes are pinned by sha256 and a robot that draws. The demo took the
+second, pointing at a copy of the URDF in the Python estimator's checkout. When that copy moved, the
+meshes went with it.
+
+**Verified headlessly** (`MeshResolutionTest`): with `<sdk>/alex-models/` as the root, 29 of the
+vendored URDF's 37 `package://` references resolve — every leg, pelvis and torso mesh. The other 8
+are ability-hand hulls in `ihmc_hands_ros2/meshes/`. `getFileName()` now returns an **absolute path
+to a file that exists**, e.g.
+`…/ihmc-alex-sdk/alex-models/alex_virtual_description/alex_v1_description/meshes/legs/Pelvis.obj`.
+
+**Why that probably — but not certainly — kills the JavaFX failure.** The old error was
 
 ```
-JavaFXVisualTools: Could not import model file:
-  file:/home/llibshutz/alex/alex-mocap/yoGraphicResources/alex_V1_description/meshes/legs/Pelvis.obj
-  NullPointerException: Cannot read the array length because "array" is null
+file:/home/llibshutz/alex/alex-mocap/yoGraphicResources/alex_V1_description/meshes/legs/Pelvis.obj
 ```
 
-264 of these. Three things wrong with that path, and it is a **different resolution layer** from the
-one already fixed:
+which is a *relative* path resolved against `<cwd>/yoGraphicResources/`, with the
+`alex_virtual_description/` segment dropped and the case changed. That shape is what you get when
+`getFileName()` holds a relative string and something downstream prefixes a staging directory. With
+an absolute path to an existing file there is nothing left to prefix. **This has not been observed
+on a display, so treat it as diagnosed rather than closed.** (An earlier commit message here
+overstated it as "closes".)
 
-- root is `<cwd>/yoGraphicResources/`, which does not exist;
-- the `alex_virtual_description/` segment has been dropped;
-- **case differs** — `alex_V1_description` vs the actual `alex_v1_description`.
-
-Actual file: `…/assets/alex_virtual_description/alex_v1_description/meshes/legs/Pelvis.obj`.
-
-Next step: find what maps SDFTools' resolved absolute path into `yoGraphicResources/…` — likely
-JavaFX-side resource handling in the session visualizer — and whether the case change is ours or
-theirs. Consequence today: the window opens and works, the CoM sphere and pelvis triad draw, but the
-robot has no visible shapes.
+**Note the casing is still unexplained.** Nothing on disk is spelled `alex_V1_description` — not the
+SDK, not the Python assets, not the URDF text. `AlexURDFParameters` in the `alex` repo has that
+spelling in a *comment* only. If bare meshes ever come back, that is the thread to pull.
 
 ### Also open
 
 - **Nobody has confirmed a window renders on a machine with a display.** JavaFX initialises here
-  (FXML loads, "Linking YoVariables") but this box is headless.
+  (FXML loads, "Linking YoVariables") but this box is headless. This is now the only thing standing
+  between "meshes resolve" and "meshes draw".
+- **The SCS2 track is written but not compiled.** `integration/AlexMocapGroundTruthTrack.java` plus
+  `integration/README.md`; it needs three edits in the `alex` repo (an `includeBuild`, a dependency,
+  a file copy) that were deliberately not applied. APIs were checked with `javap` against
+  17-0.33.2, but nothing has been through a compiler.
 - `.idea/` is untracked and unignored on every branch.
 - G3 (`VolumeDistortionGate`) is still an empty placeholder — it needs a physical two-marker artifact.
 

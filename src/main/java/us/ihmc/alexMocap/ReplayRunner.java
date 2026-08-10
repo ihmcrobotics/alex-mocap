@@ -242,7 +242,12 @@ public class ReplayRunner
       {
          out.println();
          out.println("opening the SCS2 visualizer...");
-         GroundTruthSessionVisualizer.show(arguments.urdf, samples, usedEncoders, world.getGravityAlignedWorld(), arguments.sampleRateHz);
+         GroundTruthSessionVisualizer.show(arguments.urdf,
+                                            arguments.meshDirectories,
+                                            samples,
+                                            usedEncoders,
+                                            world.getGravityAlignedWorld(),
+                                            arguments.sampleRateHz);
       }
 
       return refusedFrames == 0 ? EXIT_OK : EXIT_REFUSALS;
@@ -402,6 +407,9 @@ public class ReplayRunner
               --mass-uncertainty <f>    per-link mass uncertainty for the budget. Default 0.05.
               --com-uncertainty <m>     per-axis link-CoM uncertainty. Default 0.005.
               --visualize               open the SCS2 visualizer afterwards. Needs a display.
+              --mesh-dir <dir>          root for package:// mesh lookups. Repeatable, searched in
+                                        order. Defaults to the URDF's own directory. Alex's meshes
+                                        are in ihmc-alex-sdk/alex-models/, not beside the URDF.
               --help
 
             Exit codes:
@@ -427,6 +435,16 @@ public class ReplayRunner
       double comUncertainty = 0.005;
       boolean visualize = false;
       boolean help = false;
+
+      /**
+       * Roots for {@code package://} mesh lookups, in search order. Repeatable.
+       * <p>
+       * Empty means "look beside the URDF", which is the old behaviour and is right when a model
+       * ships its meshes with it. Alex's does not: the URDF is pinned by sha256 in the provenance
+       * and the meshes live in ihmc-alex-sdk, so the two roots have to be nameable separately.
+       * </p>
+       */
+      final List<String> meshDirectories = new ArrayList<>();
 
       static Arguments parse(String[] args)
       {
@@ -457,6 +475,7 @@ public class ReplayRunner
                case "--mass-uncertainty" -> arguments.massUncertainty = Double.parseDouble(value(args, ++i, "--mass-uncertainty"));
                case "--com-uncertainty" -> arguments.comUncertainty = Double.parseDouble(value(args, ++i, "--com-uncertainty"));
                case "--visualize" -> arguments.visualize = true;
+               case "--mesh-dir" -> arguments.meshDirectories.add(value(args, ++i, "--mesh-dir"));
                default -> throw new IllegalArgumentException("unknown option '" + args[i] + "'");
             }
          }

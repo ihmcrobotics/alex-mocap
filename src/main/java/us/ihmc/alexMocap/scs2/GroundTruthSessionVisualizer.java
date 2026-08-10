@@ -72,12 +72,49 @@ public class GroundTruthSessionVisualizer
                            double sampleRateHz)
          throws IOException
    {
+      show(urdfFile, List.of(), samples, encoderSamples, gravityAlignedWorld, sampleRateHz);
+   }
+
+   /**
+    * As {@link #show(Path, List, List, ReferenceFrame, double)}, with the mesh roots given
+    * explicitly.
+    *
+    * <h2>Why the mesh root is separable from the URDF</h2>
+    * <p>
+    * {@code package://} resolves against a directory whose <i>name</i> is the authority in the URI,
+    * and nothing requires that directory to sit beside the URDF. On Alex it does not: the model this
+    * project calibrates against is a vendored copy in test resources -- deliberately, so CI needs
+    * nothing outside the repo -- while the meshes live in {@code ihmc-alex-sdk/alex-models/}. Tying
+    * the two together forces a choice between a model whose bytes are pinned and a robot that draws,
+    * and the single-root behaviour quietly took the second.
+    * </p>
+    * <p>
+    * Splitting them means the same bytes, and the same {@code sha256} in the provenance, can be
+    * drawn with the SDK's meshes. Measured against the vendored Alex URDF: 29 of its 37
+    * {@code package://} references resolve under {@code alex-models/}, which is every leg, pelvis
+    * and torso mesh. The 8 that do not are ability-hand hulls, which live under
+    * {@code ihmc_hands_ros2/meshes/} -- pass that as a second root if the hands matter, or leave it
+    * out and let them drop.
+    * </p>
+    *
+    * @param resourceDirectories roots for {@code package://} lookups. Empty falls back to the URDF's
+    *                            own parent directory, which is the right answer when the meshes do
+    *                            sit beside it.
+    */
+   public static void show(Path urdfFile,
+                           List<String> resourceDirectories,
+                           List<GroundTruthSample> samples,
+                           List<EncoderSample> encoderSamples,
+                           ReferenceFrame gravityAlignedWorld,
+                           double sampleRateHz)
+         throws IOException
+   {
       if (samples.isEmpty())
          throw new IllegalArgumentException("Nothing to show: the trajectory is empty.");
       if (samples.size() != encoderSamples.size())
          throw new IllegalArgumentException("Got " + samples.size() + " ground truth samples and " + encoderSamples.size() + " encoder samples.");
 
-      RobotDefinition robotDefinition = loadRobotDefinition(urdfFile);
+      RobotDefinition robotDefinition = loadRobotDefinition(urdfFile, resourceDirectories);
       dropUnrepresentableGeometry(robotDefinition, urdfFile);
 
       SimulationSession session = new SimulationSession(PhysicsEngineFactory.newDoNothingPhysicsEngineFactory());
@@ -239,7 +276,7 @@ public class GroundTruthSessionVisualizer
       robot.getRootBody().updateFramesRecursively();
    }
 
-   private static RobotDefinition loadRobotDefinition(Path urdfFile) throws IOException
+   private static RobotDefinition loadRobotDefinition(Path urdfFile, List<String> resourceDirectories) throws IOException
    {
       // Loaded here rather than through model.URDFLoader on purpose: that class returns a Mecano
       // tree and deliberately lets no SCS2 type escape into a signature, which is what keeps the
@@ -259,11 +296,16 @@ public class GroundTruthSessionVisualizer
       //
       // The cost of getting this wrong is not an error. It is 56 silently dropped visuals and a
       // robot drawn as bare coordinate frames, which reads as "the model is broken".
-      List<String> resourceDirectories = urdfFile.getParent() == null ? List.of() : List.of(urdfFile.getParent().toString());
+      //
+      // The caller's roots win when given; falling back to the URDF's parent keeps the old
+      // behaviour for a model that does ship its meshes alongside.
+      List<String> roots = resourceDirectories.isEmpty()
+            ? (urdfFile.getParent() == null ? List.of() : List.of(urdfFile.getParent().toString()))
+            : List.copyOf(resourceDirectories);
 
       try (InputStream urdfStream = Files.newInputStream(urdfFile))
       {
-         return URDFTools.toRobotDefinition(URDFTools.loadURDFModel(urdfStream, resourceDirectories, GroundTruthSessionVisualizer.class.getClassLoader()));
+         return URDFTools.toRobotDefinition(URDFTools.loadURDFModel(urdfStream, roots, GroundTruthSessionVisualizer.class.getClassLoader()));
       }
       catch (Exception e)
       {

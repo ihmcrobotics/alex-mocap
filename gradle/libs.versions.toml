@@ -24,6 +24,11 @@ euclid-frame = { module = "us.ihmc:euclid-frame", version.ref = "euclid" }
 euclid-geometry = { module = "us.ihmc:euclid-geometry", version.ref = "euclid" }
 mecano = { module = "us.ihmc:mecano", version.ref = "mecano" }
 scs2-definition = { module = "us.ihmc:scs2-definition", version.ref = "scs2" }
+# PR3 only, and only for the `scs2` package. Drags JavaFX 17.0.8 with it.
+scs2-session-visualizer-jfx = { module = "us.ihmc:scs2-session-visualizer-jfx", version.ref = "scs2" }
+# Live telemetry. Headless -- no JavaFX -- and already on the graph transitively via
+# scs2-definition; declared explicitly because the `scs2` package uses YoVariable types directly.
+ihmc-yovariables = { module = "us.ihmc:ihmc-yovariables", version = "0.13.6" }
 ejml-core = { module = "org.ejml:ejml-core", version.ref = "ejml" }
 ejml-ddense = { module = "org.ejml:ejml-ddense", version.ref = "ejml" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }

@@ -179,6 +179,58 @@ public class PackageDependencyTest
          fail("SCS2 containment violated (FRAMEWORK.md §19):\n  " + String.join("\n  ", new TreeSet<>(violations)));
    }
 
+   /**
+    * The heavy dependencies PR3 adds, and the packages allowed to reference them.
+    * <p>
+    * JavaFX is the one that matters. FRAMEWORK.md §19's headless-testability rule is only worth
+    * anything if it is checked, and "no test opens a window" is not the same claim as "no package
+    * outside {@code scs2} can". A stray {@code javafx.scene.paint.Color} import in
+    * {@code runtime} would compile, pass every test, and then fail on the robot's headless
+    * computer.
+    * </p>
+    * <p>
+    * YoVariables is headless and harmless to resolve, but it is confined for a different reason:
+    * telemetry in {@code runtime} would be telemetry in the 200 Hz loop, and the allocation-free
+    * claim there is easier to keep true if the option is not present.
+    * </p>
+    */
+   private static final Map<String, String> CONFINED_EXTERNAL_PACKAGES = new LinkedHashMap<>();
+
+   static
+   {
+      CONFINED_EXTERNAL_PACKAGES.put("javafx/", "scs2");
+      CONFINED_EXTERNAL_PACKAGES.put("us/ihmc/yoVariables/", "scs2");
+   }
+
+   @Test
+   public void testJavaFxAndYoVariablesStayInsideScs2() throws IOException, URISyntaxException
+   {
+      Path classesRoot = mainClassesDirectory();
+      List<String> violations = new ArrayList<>();
+
+      try (Stream<Path> files = Files.walk(classesRoot))
+      {
+         for (Path classFile : files.filter(p -> p.toString().endsWith(".class")).toList())
+         {
+            String owner = packageOf(classesRoot.relativize(classFile).toString().replace('\\', '/'));
+            String contents = new String(Files.readAllBytes(classFile), java.nio.charset.StandardCharsets.ISO_8859_1);
+
+            for (Map.Entry<String, String> confined : CONFINED_EXTERNAL_PACKAGES.entrySet())
+            {
+               if (owner.equals(confined.getValue()))
+                  continue;
+
+               if (contents.contains(confined.getKey()))
+                  violations.add(classesRoot.relativize(classFile) + " references '" + confined.getKey() + "', which only the '" + confined.getValue()
+                        + "' package may use.");
+            }
+         }
+      }
+
+      if (!violations.isEmpty())
+         fail("Confined dependency escaped its package (FRAMEWORK.md §19):\n  " + String.join("\n  ", new TreeSet<>(violations)));
+   }
+
    /** Every {@code us/ihmc/scs2/<pkg>/} occurrence in a class file's constant pool. */
    private static Set<String> referencedExternalScs2Packages(String classFileContents)
    {

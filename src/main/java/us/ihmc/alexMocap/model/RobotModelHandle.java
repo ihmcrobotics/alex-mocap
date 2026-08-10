@@ -356,6 +356,36 @@ public class RobotModelHandle
       getLinkFrame(linkName).getTransformToDesiredFrame(toPack, baseFrame);
    }
 
+   /**
+    * The link this one hangs from, or {@code null} if it is the base.
+    * <p>
+    * Returns {@code null} at the base rather than the synthetic {@code rootBody}, so a walk up the
+    * tree terminates on the URDF's own root instead of stepping into SCS2's scaffolding.
+    * </p>
+    */
+   public String getParentLinkName(String linkName)
+   {
+      RigidBodyBasics body = getLink(linkName);
+
+      if (body == baseLink)
+         return null;
+
+      return body.getParentJoint().getPredecessor().getName();
+   }
+
+   /**
+    * {@code ^to T_from}: the transform taking a point in one link's frame into another's, at the
+    * current configuration.
+    * <p>
+    * F7 (FRAMEWORK.md §10) is exactly this, with {@code to} a marked ancestor and {@code from} the
+    * unmarked link being chained. Allocation-free.
+    * </p>
+    */
+   public void packLinkToLink(String fromLinkName, String toLinkName, RigidBodyTransform toPack)
+   {
+      getLinkFrame(fromLinkName).getTransformToDesiredFrame(toPack, getLinkFrame(toLinkName));
+   }
+
    /** Mass of one link, {@code m_i}, from its URDF inertial block. Assumed, not measured. */
    public double getMass(String linkName)
    {

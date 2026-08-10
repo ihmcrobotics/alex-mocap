@@ -55,6 +55,15 @@ dependencies {
     // PackageDependencyTest checks it, rather than trusting this comment.
     implementation(libs.scs2.definition)
 
+    // PR3. Both are confined to the `scs2` package by FRAMEWORK.md §19 and by
+    // PackageDependencyTest, which scans compiled classes rather than trusting this comment.
+    //
+    // The visualizer drags JavaFX. That is exactly why the rule exists: every other package must
+    // stay runnable, and testable, on a machine with no display. Nothing in the test suite touches
+    // either of these, so CI never initialises a toolkit.
+    implementation(libs.ihmc.yovariables)
+    implementation(libs.scs2.session.visualizer.jfx)
+
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)
     // Tests reach into EJML directly to build matrices with planted singular values.

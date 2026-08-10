@@ -7,6 +7,19 @@
 
 plugins {
     `java-library`
+    application
+}
+
+application {
+    mainClass = "us.ihmc.alexMocap.CalibrationRunner"
+    applicationName = "alex-mocap"
+}
+
+// CalibrationRunner returns an exit code and main() passes it to System.exit; without this,
+// `gradlew run` reports its own BUILD FAILED on top of a gate failure, which buries the gate's
+// table under a Gradle stack trace. The exit code still reaches a caller of installDist.
+tasks.named<JavaExec>("run") {
+    isIgnoreExitValue = true
 }
 
 repositories {
@@ -26,4 +39,42 @@ dependencies {
     api(libs.euclid.frame)
     api(libs.euclid.geometry)
     api(libs.mecano)
+
+    // implementation, not api: EJML is an internal detail of `registration`. No EJML type
+    // appears in a public signature -- RegistrationResult reports doubles and a
+    // RigidBodyTransform -- and keeping it off the api surface is what stops callers from
+    // reaching past RigidBodyRegistration and writing a second SVD (FRAMEWORK.md §2:
+    // "There must be exactly one implementation").
+    implementation(libs.ejml.core)
+    implementation(libs.ejml.ddense)
+
+    // implementation, not api, for the same reason as EJML: SCS2 is an internal detail of
+    // `model`. URDFLoader takes a Path and hands back a Mecano RigidBodyBasics, so no
+    // RobotDefinition, URDFModel, or other SCS2 type appears in a signature anywhere in this
+    // project. That containment is what makes the FRAMEWORK.md §19 rule checkable -- and
+    // PackageDependencyTest checks it, rather than trusting this comment.
+    implementation(libs.scs2.definition)
+
+    // PR3. Both are confined to the `scs2` package by FRAMEWORK.md §19 and by
+    // PackageDependencyTest, which scans compiled classes rather than trusting this comment.
+    //
+    // The visualizer drags JavaFX. That is exactly why the rule exists: every other package must
+    // stay runnable, and testable, on a machine with no display. Nothing in the test suite touches
+    // either of these, so CI never initialises a toolkit.
+    implementation(libs.ihmc.yovariables)
+    implementation(libs.scs2.session.visualizer.jfx)
+
+    testImplementation(libs.junit.jupiter)
+    testRuntimeOnly(libs.junit.platform.launcher)
+    // Tests reach into EJML directly to build matrices with planted singular values.
+    testImplementation(libs.ejml.ddense)
+}
+
+tasks.test {
+    useJUnitPlatform()
+
+    testLogging {
+        events("failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
 }

@@ -7,9 +7,29 @@
 mecano = "17-0.19.2"
 # mecano 17-0.19.2 pulls euclid 0.22.3 transitively; pinned up to the latest 0.22.x patch.
 euclid = "0.22.5"
+# The version euclid and mecano both already resolve to. Declared explicitly because
+# `registration` uses the SVD directly and must not depend on mecano to get it.
+ejml = "0.39"
+# scs2-definition only. It is the headless half of SCS2: URDFTools, RobotDefinition, and
+# RobotDefinition.newInstance() -> a Mecano RigidBodyBasics. It pulls no JavaFX, and its own
+# POM pins euclid 0.22.5 and mecano 17-0.19.2 -- exactly the versions above, so nothing here
+# is upgraded by adding it. The visualizer (scs2-session-visualizer-jfx) is a separate
+# artifact and is deliberately NOT declared until PR3.
+scs2 = "17-0.30.0"
+junit = "5.10.2"
 
 [libraries]
 euclid = { module = "us.ihmc:euclid", version.ref = "euclid" }
 euclid-frame = { module = "us.ihmc:euclid-frame", version.ref = "euclid" }
 euclid-geometry = { module = "us.ihmc:euclid-geometry", version.ref = "euclid" }
 mecano = { module = "us.ihmc:mecano", version.ref = "mecano" }
+scs2-definition = { module = "us.ihmc:scs2-definition", version.ref = "scs2" }
+# PR3 only, and only for the `scs2` package. Drags JavaFX 17.0.8 with it.
+scs2-session-visualizer-jfx = { module = "us.ihmc:scs2-session-visualizer-jfx", version.ref = "scs2" }
+# Live telemetry. Headless -- no JavaFX -- and already on the graph transitively via
+# scs2-definition; declared explicitly because the `scs2` package uses YoVariable types directly.
+ihmc-yovariables = { module = "us.ihmc:ihmc-yovariables", version = "0.13.6" }
+ejml-core = { module = "org.ejml:ejml-core", version.ref = "ejml" }
+ejml-ddense = { module = "org.ejml:ejml-ddense", version.ref = "ejml" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version = "1.10.2" }

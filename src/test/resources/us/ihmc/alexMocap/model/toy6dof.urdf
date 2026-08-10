@@ -1,0 +1,167 @@
+<?xml version="1.0"?>
+<!--
+  Toy 6-DOF robot for the PR2 plant-and-recover test (PR_PLAN.md §"PR 2").
+
+  Shape, and why it is this shape:
+
+    pelvis                          <- the base link, frame `b`. Carries the gauge cluster.
+      +- l_hip   (revolute, x)      <- branch 1: ROLL, and that matters. See below.
+      |    l_thigh
+      |      +- l_knee  (revolute, y)
+      |           l_shank
+      |             +- l_ankle (revolute, y)
+      |                  l_foot
+      +- r_hip   (revolute, x)      <- branch 2
+           r_thigh
+             +- r_knee  (revolute, y)
+                  r_shank
+                    +- r_ankle (revolute, y)
+                         r_foot
+
+  TWO serial branches, not one. PR_PLAN.md requires this and the reason is F5: `Delta` is a
+  single global 6-DOF constant identified from the marked links BELOW the pelvis. A single
+  chain swung through a set of configurations traces marker paths that are consistent with a
+  one-parameter family of `Delta` values about the chain's own axis bundle; a second branch
+  displaced in y breaks that. FRAMEWORK.md §7 makes the same point from the other side:
+  pelvis-cluster markers contribute nothing to `Delta` beyond a constant.
+
+  THE HIP ROLLS, and this is the single most load-bearing choice in the file.
+
+  Replacing `Delta` by `Delta * G` for a pure translation `g` shifts every layout by
+  `R_i(q)^T g`. That is an exact symmetry (identical `J`, different answer) precisely when
+  `R_i(q)^T g` is the same at every capture, which happens when `g` lies along an axis that
+  every marked link merely rotates about.
+
+  An earlier version of this file had hip and knee both pitching about y, with the ankle the
+  only x joint. With the pelvis, thighs and shanks marked, every marked link's orientation was
+  then a rotation about y alone, so a translation along y was FREE. A' converged to
+  `J = 7.6e-29` (machine zero, a perfect fit) and landed 13 mm from the planted truth, with
+  every cluster displaced by the same vector. Marking the feet closed the symmetry but left it
+  barely conditioned: at `sigma = 0.3 mm` the layout error was 1.77 mm against a `sigma/sqrt(K)`
+  expectation of 0.055 mm, a 6x variance amplification, and A' needed ~200 iterations.
+
+  With the hip rolling about x and knee/ankle pitching about y, the thigh's orientation is
+  `R_x(q_hip)` and the shank's is `R_x(q_hip) R_y(q_knee)`. No single `g` survives both, so
+  there is no degenerate direction to condition badly. This is the toy-scale version of
+  FRAMEWORK.md §1's "wide joint excursion" requirement, and the lesson it encodes is that the
+  failure mode of poor excursion is a SMALL residual and a WRONG answer.
+
+  ASYMMETRIC LINK LENGTHS between left and right (0.30/0.28 vs 0.29/0.27). A left-right mirror
+  symmetric robot admits a discrete reflection ambiguity; the asymmetry removes it so a test
+  failure means the solver is wrong rather than that it found the other valid answer.
+
+  Inertials are present on every link and are plausible-but-invented. They are NOT exercised by
+  PR2 (F9 is PR3), but Mecano requires a positive-definite inertia to build the body, and
+  inventing them here rather than later keeps the CoM tests of PR3 from needing a second URDF.
+  Consistent with FRAMEWORK.md §3, this file is `assumed`, not measured.
+-->
+<robot name="toy6dof">
+
+  <!-- ============================ base ============================ -->
+  <link name="pelvis">
+    <inertial>
+      <origin xyz="0.0 0.0 0.05" rpy="0 0 0"/>
+      <mass value="10.0"/>
+      <inertia ixx="0.080" ixy="0.0" ixz="0.0" iyy="0.060" iyz="0.0" izz="0.050"/>
+    </inertial>
+  </link>
+
+  <!-- ========================= left branch ========================= -->
+  <joint name="l_hip" type="revolute">
+    <parent link="pelvis"/>
+    <child link="l_thigh"/>
+    <origin xyz="0.0 0.09 -0.02" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-1.6" upper="1.6" effort="150.0" velocity="8.0"/>
+  </joint>
+
+  <link name="l_thigh">
+    <inertial>
+      <origin xyz="0.0 0.0 -0.15" rpy="0 0 0"/>
+      <mass value="5.0"/>
+      <inertia ixx="0.045" ixy="0.0" ixz="0.0" iyy="0.045" iyz="0.0" izz="0.008"/>
+    </inertial>
+  </link>
+
+  <joint name="l_knee" type="revolute">
+    <parent link="l_thigh"/>
+    <child link="l_shank"/>
+    <origin xyz="0.0 0.0 -0.30" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.05" upper="2.4" effort="150.0" velocity="8.0"/>
+  </joint>
+
+  <link name="l_shank">
+    <inertial>
+      <origin xyz="0.0 0.0 -0.12" rpy="0 0 0"/>
+      <mass value="3.0"/>
+      <inertia ixx="0.022" ixy="0.0" ixz="0.0" iyy="0.022" iyz="0.0" izz="0.004"/>
+    </inertial>
+  </link>
+
+  <joint name="l_ankle" type="revolute">
+    <parent link="l_shank"/>
+    <child link="l_foot"/>
+    <origin xyz="0.0 0.0 -0.28" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.7" upper="0.7" effort="90.0" velocity="8.0"/>
+  </joint>
+
+  <link name="l_foot">
+    <inertial>
+      <origin xyz="0.02 0.0 -0.03" rpy="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.0016" ixy="0.0" ixz="0.0" iyy="0.0030" iyz="0.0" izz="0.0035"/>
+    </inertial>
+  </link>
+
+  <!-- ======================== right branch ========================= -->
+  <joint name="r_hip" type="revolute">
+    <parent link="pelvis"/>
+    <child link="r_thigh"/>
+    <origin xyz="0.0 -0.09 -0.02" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-1.6" upper="1.6" effort="150.0" velocity="8.0"/>
+  </joint>
+
+  <link name="r_thigh">
+    <inertial>
+      <origin xyz="0.0 0.0 -0.145" rpy="0 0 0"/>
+      <mass value="5.0"/>
+      <inertia ixx="0.043" ixy="0.0" ixz="0.0" iyy="0.043" iyz="0.0" izz="0.008"/>
+    </inertial>
+  </link>
+
+  <joint name="r_knee" type="revolute">
+    <parent link="r_thigh"/>
+    <child link="r_shank"/>
+    <origin xyz="0.0 0.0 -0.29" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.05" upper="2.4" effort="150.0" velocity="8.0"/>
+  </joint>
+
+  <link name="r_shank">
+    <inertial>
+      <origin xyz="0.0 0.0 -0.115" rpy="0 0 0"/>
+      <mass value="3.0"/>
+      <inertia ixx="0.021" ixy="0.0" ixz="0.0" iyy="0.021" iyz="0.0" izz="0.004"/>
+    </inertial>
+  </link>
+
+  <joint name="r_ankle" type="revolute">
+    <parent link="r_shank"/>
+    <child link="r_foot"/>
+    <origin xyz="0.0 0.0 -0.27" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.7" upper="0.7" effort="90.0" velocity="8.0"/>
+  </joint>
+
+  <link name="r_foot">
+    <inertial>
+      <origin xyz="0.02 0.0 -0.03" rpy="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.0016" ixy="0.0" ixz="0.0" iyy="0.0030" iyz="0.0" izz="0.0035"/>
+    </inertial>
+  </link>
+
+</robot>

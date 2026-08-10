@@ -2,7 +2,7 @@
 
 Branch `pr4-alex-demo`, worktree `/home/llibshutz/alex/alex-mocap-demo`. Local only, not
 pushed, no PR opened. `./gradlew clean build --rerun-tasks` is green: **168 tests, 0
-failures, 0 skipped, nothing disabled.** Three commits.
+failures, 0 skipped, nothing disabled.** Four commits, `da867c2..4bc74e9`.
 
 ---
 

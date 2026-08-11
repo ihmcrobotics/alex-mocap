@@ -22,8 +22,39 @@ tasks.named<JavaExec>("run") {
     isIgnoreExitValue = true
 }
 
+// AlexLegDemo lives in test scope on purpose -- it depends on RobotCaptures, which invents mocap
+// data and has no business on the shipping classpath. IntelliJ will green-arrow a main out of test
+// sources without complaint, but from a terminal there was no way to run it at all: `run` uses the
+// main source set, and assembling the test runtime classpath by hand is exactly the kind of thing
+// nobody should have to work out twice.
+//
+// isIgnoreExitValue for the same reason as `run` above: the demo exits non-zero when a frame was
+// refused, which on --degenerate is the point being made rather than a build failure.
+tasks.register<JavaExec>("alexLegDemo") {
+    group = "application"
+    description = "The real-Alex leg-marker demonstration: generate -> calibrate -> replay -> SCS2."
+    mainClass = "us.ihmc.alexMocap.AlexLegDemo"
+    classpath = sourceSets["test"].runtimeClasspath
+    isIgnoreExitValue = true
+
+    // Forwarded so the documented flags work: --no-visualize, --degenerate, --out <dir>.
+    systemProperty("alex.sdk.dir", providers.systemProperty("alex.sdk.dir").getOrElse(""))
+}
+
+// Maven coordinates, not decoration. The SCS2 mocap ground-truth track lives in the `alex`
+// repository and consumes this project through Gradle composite-build substitution
+// (`includeBuild`), which matches an included build to a dependency by group:name. Without a
+// group this project is unaddressable and the substitution silently does not happen -- Gradle
+// then goes looking for `alex-mocap` in a remote repository and fails with "not found", which
+// reads as a missing artifact rather than as a missing `group`.
+group = "us.ihmc"
+version = "0.1.0"
+
 repositories {
     mavenCentral()
+    // mecano 17-0.19.3 and scs2 17-0.33.2 -- the versions the IHMC stack pins -- are not on
+    // Maven Central. This is the same repository the IHMC repository-group builds declare.
+    maven { url = uri("https://robotlabfiles.ihmc.us/repository/") }
 }
 
 java {
@@ -73,8 +104,18 @@ dependencies {
 tasks.test {
     useJUnitPlatform()
 
+    // AlexLegDemoTest prints its tables only under -Dalex.demo.verbose=true, so CI stays quiet.
+    // Gradle's Test task does NOT inherit the launching JVM's system properties, so without this
+    // forwarding the documented flag is accepted on the command line and silently does nothing --
+    // which reads as "the demo has no verbose output" rather than as a build gap.
+    val demoVerbose = providers.systemProperty("alex.demo.verbose").getOrElse("false")
+    systemProperty("alex.demo.verbose", demoVerbose)
+    inputs.property("alex.demo.verbose", demoVerbose)
+
     testLogging {
         events("failed")
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        // Only when asked: the demo tables are hundreds of lines.
+        showStandardStreams = demoVerbose.toBoolean()
     }
 }

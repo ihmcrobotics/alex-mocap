@@ -253,6 +253,44 @@ public class RobotModelHandle
       return joints[jointIndex].getQ();
    }
 
+   /**
+    * Lower joint limit in radians, as parsed from the URDF's {@code <limit lower="...">}.
+    * <p>
+    * One parse, one source of truth. A generator that wants physically reachable configurations
+    * must not re-read the URDF for its limits: two parsers of the same file drift, and the failure
+    * mode is a capture set at configurations the robot cannot reach, which looks exactly like a
+    * good capture set.
+    * </p>
+    * <p>
+    * <b>A limit may be infinite.</b> SCS2 leaves {@code ±Double.POSITIVE_INFINITY} where the URDF
+    * gives no {@code <limit>} block, which is legal URDF for a continuous joint. Sampling uniformly
+    * inside such a range yields NaN, so a caller that samples must check. Alex declares finite
+    * limits on all 29 of its revolute joints, but nothing in the loader enforces that.
+    * </p>
+    */
+   public double getJointLimitLower(int jointIndex)
+   {
+      return joints[jointIndex].getJointLimitLower();
+   }
+
+   /** @see #getJointLimitLower(int) */
+   public double getJointLimitUpper(int jointIndex)
+   {
+      return joints[jointIndex].getJointLimitUpper();
+   }
+
+   /** @see #getJointLimitLower(int) */
+   public double getJointLimitLower(String jointName)
+   {
+      return joints[indexOfJoint(jointName)].getJointLimitLower();
+   }
+
+   /** @see #getJointLimitLower(int) */
+   public double getJointLimitUpper(String jointName)
+   {
+      return joints[indexOfJoint(jointName)].getJointLimitUpper();
+   }
+
    public void setQ(int jointIndex, double q)
    {
       joints[jointIndex].setQ(q);

@@ -1,0 +1,589 @@
+<title>alex-mocap on the real Alex model — leg-only marker set</title>
+<style>
+  /* ---- tokens: light is the base, both dark paths redefine only these ---- */
+  :root {
+    --ground:      #F4F7F7;
+    --surface:     #FFFFFF;
+    --surface-2:   #EDF2F2;
+    --hairline:    #D8E1E1;
+    --ink:         #0D1416;
+    --ink-2:       #4E5C60;
+    --ink-3:       #839094;
+
+    --sig-1:       #5FB3C2;   /* sigma 0.10 mm  — validated ordinal ramp, light */
+    --sig-2:       #2A7F92;   /* sigma 0.30 mm */
+    --sig-3:       #0C4353;   /* sigma 0.93 mm */
+    --accent:      #2A7F92;
+
+    --crit:        #B03A38;
+    --crit-soft:   #F3DCDB;
+    --warn:        #8A5A0F;
+    --warn-soft:   #F6EAD3;
+    --good:        #1F6B4F;
+
+    --shadow: 0 1px 2px rgba(13,20,22,.05), 0 8px 24px -12px rgba(13,20,22,.14);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:    #0E1416;
+      --surface:   #151D20;
+      --surface-2: #1C2529;
+      --hairline:  #2A3538;
+      --ink:       #E7EEEF;
+      --ink-2:     #A4B2B6;
+      --ink-3:     #748488;
+
+      --sig-1:     #22697C;
+      --sig-2:     #4FA8BC;
+      --sig-3:     #A9DEE7;
+      --accent:    #4FA8BC;
+
+      --crit:      #E88A86;
+      --crit-soft: #33201F;
+      --warn:      #E0A94E;
+      --warn-soft: #2C2415;
+      --good:      #6FC49E;
+
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:    #0E1416;
+    --surface:   #151D20;
+    --surface-2: #1C2529;
+    --hairline:  #2A3538;
+    --ink:       #E7EEEF;
+    --ink-2:     #A4B2B6;
+    --ink-3:     #748488;
+
+    --sig-1:     #22697C;
+    --sig-2:     #4FA8BC;
+    --sig-3:     #A9DEE7;
+    --accent:    #4FA8BC;
+
+    --crit:      #E88A86;
+    --crit-soft: #33201F;
+    --warn:      #E0A94E;
+    --warn-soft: #2C2415;
+    --good:      #6FC49E;
+
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.6);
+  }
+
+  /* ---- base ---- */
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font: 400 16px/1.62 ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 812px; margin: 0 auto; padding: 56px 24px 96px; }
+
+  h1, h2, h3 {
+    font-family: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    font-weight: 600; text-wrap: balance; margin: 0;
+  }
+  h1 { font-size: 2.05rem; line-height: 1.18; letter-spacing: -.012em; }
+  h2 { font-size: 1.32rem; line-height: 1.28; margin-bottom: .35em; }
+  h3 { font-size: 1.02rem; line-height: 1.35; margin-bottom: .3em; }
+  p  { margin: 0 0 1em; max-width: 68ch; color: var(--ink-2); }
+  p.lede { color: var(--ink); font-size: 1.08rem; }
+  strong { color: var(--ink); font-weight: 600; }
+  a { color: var(--accent); }
+
+  .eyebrow {
+    font: 600 11.5px/1 ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3);
+  }
+  code, .mono, td.num, th.num {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  code { font-size: .875em; background: var(--surface-2); padding: .1em .38em; border-radius: 3px; }
+
+  header { border-bottom: 1px solid var(--hairline); padding-bottom: 26px; margin-bottom: 30px; }
+  header .eyebrow { display: block; margin-bottom: 12px; }
+  .sub { color: var(--ink-3); font-size: .92rem; margin-top: 12px; }
+
+  section { padding-top: 34px; margin-top: 34px; border-top: 1px solid var(--hairline); }
+  section:first-of-type { border-top: 0; margin-top: 0; padding-top: 4px; }
+
+  /* ---- verdict ---- */
+  .verdict {
+    display: flex; gap: 14px; align-items: flex-start;
+    background: var(--surface); border: 1px solid var(--hairline);
+    border-left: 3px solid var(--good);
+    border-radius: 6px; padding: 18px 20px; margin-bottom: 30px; box-shadow: var(--shadow);
+  }
+  .verdict p { margin: 0; }
+
+  /* ---- stat grid ---- */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 2px;
+           background: var(--hairline); border: 1px solid var(--hairline); border-radius: 6px; overflow: hidden; }
+  .stat { background: var(--surface); padding: 16px 18px; }
+  .stat .k { display: block; font: 600 10.5px/1 ui-monospace, Menlo, monospace;
+             letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); margin-bottom: 9px; }
+  .stat .v { font: 600 1.5rem/1.05 ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums;
+             color: var(--ink); letter-spacing: -.02em; }
+  .stat .u { font-size: .82rem; color: var(--ink-3); margin-left: 3px; font-weight: 400; }
+  .stat .n { display: block; font-size: .805rem; color: var(--ink-3); margin-top: 6px; line-height: 1.45; }
+
+  /* ---- figures ---- */
+  figure { margin: 26px 0 0; }
+  .plot { background: var(--surface); border: 1px solid var(--hairline); border-radius: 6px;
+          padding: 20px 18px 12px; box-shadow: var(--shadow); overflow-x: auto; }
+  .plot svg { display: block; width: 100%; height: auto; min-width: 480px; }
+  figcaption { font-size: .855rem; color: var(--ink-3); margin-top: 11px; line-height: 1.5; max-width: 68ch; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 14px; padding: 0; list-style: none; }
+  .legend li { display: flex; align-items: center; gap: 7px;
+               font: 500 12.5px/1 ui-monospace, Menlo, monospace; color: var(--ink-2); }
+  .swatch { width: 15px; height: 3px; border-radius: 2px; flex: none; }
+
+  .grid-line { stroke: var(--hairline); stroke-width: 1; }
+  .axis-txt  { fill: var(--ink-3); font: 11.5px ui-monospace, Menlo, monospace; }
+  .axis-ttl  { fill: var(--ink-3); font: 600 10.5px ui-monospace, Menlo, monospace; letter-spacing: .1em; }
+  .endlbl    { font: 600 12px ui-monospace, Menlo, monospace; }
+  .barlbl    { fill: var(--ink); font: 600 12.5px ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
+  .barcat    { fill: var(--ink-2); font: 12.5px ui-sans-serif, system-ui, sans-serif; }
+  .hit { fill: transparent; cursor: crosshair; }
+
+  /* ---- tables ---- */
+  details.tbl { margin-top: 14px; }
+  details.tbl summary { cursor: pointer; font-size: .85rem; color: var(--ink-3);
+                        font-family: ui-monospace, Menlo, monospace; }
+  details.tbl summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 12px; font-size: .875rem; }
+  caption { text-align: left; color: var(--ink-3); font-size: .84rem; padding-bottom: 8px; }
+  th, td { text-align: left; padding: 7px 12px 7px 0; border-bottom: 1px solid var(--hairline); }
+  th { font: 600 11px/1.3 ui-monospace, Menlo, monospace; letter-spacing: .08em;
+       text-transform: uppercase; color: var(--ink-3); }
+  td { color: var(--ink-2); }
+  td.num, th.num { text-align: right; padding-right: 0; }
+  td.num { color: var(--ink); }
+  tr.hi td { background: var(--crit-soft); }
+
+  /* ---- degeneracy pair ---- */
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 2px;
+          background: var(--hairline); border: 1px solid var(--hairline); border-radius: 6px; overflow: hidden; }
+  .pair > div { background: var(--surface); padding: 20px; }
+  .pair .k { display: block; font: 600 10.5px/1 ui-monospace, Menlo, monospace;
+             letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); margin-bottom: 10px; }
+  .pair .v { font: 600 2rem/1 ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+  .pair .u { font-size: .8rem; color: var(--ink-3); font-weight: 400; margin-left: 3px; }
+  .pair .n { display: block; font-size: .81rem; color: var(--ink-3); margin-top: 8px; line-height: 1.45; }
+  .v.ok { color: var(--good); }
+  .v.bad { color: var(--crit); }
+  @media (max-width: 560px) { .pair { grid-template-columns: 1fr; } }
+
+  .callout { background: var(--warn-soft); border: 1px solid var(--hairline); border-left: 3px solid var(--warn);
+             border-radius: 6px; padding: 15px 18px; margin: 20px 0 0; }
+  .callout p { margin: 0; color: var(--ink-2); font-size: .93rem; }
+  .callout .eyebrow { color: var(--warn); display: block; margin-bottom: 7px; }
+
+  ol.next { padding-left: 0; list-style: none; counter-reset: n; margin: 0; }
+  ol.next li { counter-increment: n; position: relative; padding: 0 0 14px 34px; color: var(--ink-2); max-width: 68ch; }
+  ol.next li::before {
+    content: counter(n); position: absolute; left: 0; top: 1px;
+    width: 22px; height: 22px; border-radius: 50%; background: var(--surface-2); color: var(--ink-2);
+    font: 600 11.5px/22px ui-monospace, Menlo, monospace; text-align: center;
+  }
+  ul.plain { padding-left: 20px; }
+  ul.plain li { color: var(--ink-2); margin-bottom: .55em; max-width: 66ch; }
+
+  #tip {
+    position: fixed; pointer-events: none; opacity: 0; transition: opacity .1s;
+    background: var(--ink); color: var(--ground); padding: 6px 9px; border-radius: 4px;
+    font: 500 12px/1.35 ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums;
+    white-space: nowrap; z-index: 10; box-shadow: var(--shadow);
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  footer { margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--hairline);
+           font-size: .83rem; color: var(--ink-3); }
+</style>
+
+<div class="wrap">
+
+<header>
+  <span class="eyebrow">alex-mocap · verification · 10 Aug 2026</span>
+  <h1>The pipeline runs on the real Alex model</h1>
+  <p class="lede" style="margin-top:14px">
+    Branch <code>pr4-alex-demo</code> puts a randomized marker set on Alex's legs and drives the whole
+    chain — calibration, runtime, gates — on the URDF the Python estimator actually uses. Until now
+    every accuracy claim was measured against a toy 6-DOF robot.
+  </p>
+  <p class="sub">
+    Source: <code>invariant-estimation/assets/alex_with_imus.urdf</code>, vendored byte-identically ·
+    168 tests, 0 failures, 0 skipped
+  </p>
+</header>
+
+<div class="verdict">
+  <div>
+    <p><strong>It works, and the real robot is better conditioned than the toy.</strong> The URDF loads
+    unmodified — capsule collisions, 17 missing hand meshes, zero-mass IMU frames and all. The CoM
+    computed from marker positions agrees with Mecano's independent calculator to
+    <code>1.1e-15 m</code>. Three findings below are worth acting on before hardware time.</p>
+  </div>
+</div>
+
+<section>
+  <h2>What was measured</h2>
+  <div class="stats">
+    <div class="stat">
+      <span class="k">URDF load</span>
+      <span class="v">29<span class="u">joints</span></span>
+      <span class="n">30 links, 91.5126 kg, root <code>PELVIS_LINK</code>. No sanitizer needed.</span>
+    </div>
+    <div class="stat">
+      <span class="k">CoM vs Mecano</span>
+      <span class="v">1.1e-15<span class="u">m</span></span>
+      <span class="n">Two paths sharing no code. The loop closes.</span>
+    </div>
+    <div class="stat">
+      <span class="k">Layout error</span>
+      <span class="v">0.314<span class="u">mm</span></span>
+      <span class="n">σ = 0.3 mm, K = 30. Toy was 0.383 mm.</span>
+    </div>
+    <div class="stat">
+      <span class="k">Pelvis attitude</span>
+      <span class="v">0.437<span class="u">°</span></span>
+      <span class="n">The ground truth's own noise floor at a 140 mm bracket.</span>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>1 · The pelvis bracket has to be wider than the spec says</h2>
+  <p>
+    Held-out marker RMS scales as <code>1/r_perp</code> in the gauge cluster's spread and linearly in
+    mocap noise. On log–log axes that power law is a straight line, and all three noise levels are
+    parallel — which is the law itself, drawn.
+  </p>
+  <p>
+    At FRAMEWORK §1's recommended 140 mm bracket and §17's 0.3 mm target noise, Alex lands at
+    <strong>2.86 mm against the 2.2 mm TALOS bar</strong> — on synthetic data with a perfect URDF, so
+    this is a floor rather than an estimate.
+  </p>
+
+  <figure>
+    <ul class="legend">
+      <li><span class="swatch" style="background:var(--sig-3)"></span>σ = 0.93 mm <span style="color:var(--ink-3)">· today's lab</span></li>
+      <li><span class="swatch" style="background:var(--sig-2)"></span>σ = 0.30 mm <span style="color:var(--ink-3)">· §17 target</span></li>
+      <li><span class="swatch" style="background:var(--sig-1)"></span>σ = 0.10 mm</li>
+    </ul>
+    <div class="plot">
+      <svg viewBox="0 0 720 384" role="img" aria-label="Held-out marker RMS against pelvis cluster spread, log-log, three mocap noise levels, with the 2.2 mm TALOS bar marked.">
+        <!-- gridlines -->
+        <g class="grid-line">
+          <line x1="56" y1="37.1"  x2="630" y2="37.1"/>
+          <line x1="56" y1="90.0"  x2="630" y2="90.0"/>
+          <line x1="56" y1="143.0" x2="630" y2="143.0"/>
+          <line x1="56" y1="213.0" x2="630" y2="213.0"/>
+          <line x1="56" y1="266.0" x2="630" y2="266.0"/>
+          <line x1="56" y1="318.9" x2="630" y2="318.9"/>
+          <line x1="56" y1="336"   x2="630" y2="336"/>
+        </g>
+        <g class="axis-txt" text-anchor="end">
+          <text x="48" y="41">20</text>
+          <text x="48" y="94">10</text>
+          <text x="48" y="147">5</text>
+          <text x="48" y="217">2</text>
+          <text x="48" y="270">1</text>
+          <text x="48" y="323">0.5</text>
+        </g>
+        <text class="axis-ttl" x="56" y="16">HELD-OUT RMS (mm)</text>
+
+        <!-- TALOS bar: a status threshold, not a gridline -->
+        <line x1="56" y1="205.7" x2="630" y2="205.7" stroke="var(--crit)" stroke-width="1.5" stroke-dasharray="5 4"/>
+        <text class="endlbl" x="630" y="201" fill="var(--crit)" text-anchor="end">TALOS bar 2.2 mm</text>
+
+        <!-- x axis -->
+        <g class="axis-txt" text-anchor="middle">
+          <text x="84.4"  y="356">60</text>
+          <text x="360.6" y="356">140</text>
+          <text x="476.8" y="356">200</text>
+          <text x="609.0" y="356">300</text>
+        </g>
+        <text class="axis-ttl" x="343" y="376" text-anchor="middle">PELVIS CLUSTER SPREAD (mm)</text>
+
+        <!-- the §1 recommendation -->
+        <line x1="360.6" y1="24" x2="360.6" y2="336" stroke="var(--ink-3)" stroke-width="1" stroke-dasharray="2 4" opacity=".55"/>
+        <text class="axis-txt" x="366" y="32" fill="var(--ink-3)">§1 recommends 140</text>
+
+        <!-- series: sigma 0.93 -->
+        <polyline fill="none" stroke="var(--sig-3)" stroke-width="2" stroke-linejoin="round"
+                  points="84.4,35.4 360.6,99.2 476.8,124.8 609.0,152.1"/>
+        <g fill="var(--sig-3)">
+          <circle cx="84.4" cy="35.4" r="4.5"/><circle cx="360.6" cy="99.2" r="4.5"/>
+          <circle cx="476.8" cy="124.8" r="4.5"/><circle cx="609.0" cy="152.1" r="4.5"/>
+        </g>
+        <text class="endlbl" x="620" y="150" fill="var(--sig-3)">4.44</text>
+
+        <!-- series: sigma 0.30 -->
+        <polyline fill="none" stroke="var(--sig-2)" stroke-width="2" stroke-linejoin="round"
+                  points="84.4,122.2 360.6,185.7 476.8,211.5 609.0,238.6"/>
+        <g fill="var(--sig-2)">
+          <circle cx="84.4" cy="122.2" r="4.5"/>
+          <circle cx="360.6" cy="185.7" r="6" stroke="var(--surface)" stroke-width="2"/>
+          <circle cx="476.8" cy="211.5" r="4.5"/><circle cx="609.0" cy="238.6" r="4.5"/>
+        </g>
+        <text class="endlbl" x="620" y="236" fill="var(--sig-2)">1.43</text>
+        <text class="endlbl" x="360.6" y="176" fill="var(--sig-2)" text-anchor="middle">2.86</text>
+
+        <!-- series: sigma 0.10 -->
+        <polyline fill="none" stroke="var(--sig-1)" stroke-width="2" stroke-linejoin="round"
+                  points="84.4,206.4 360.6,269.9 476.8,295.4 609.0,322.1"/>
+        <g fill="var(--sig-1)">
+          <circle cx="84.4" cy="206.4" r="4.5"/><circle cx="360.6" cy="269.9" r="4.5"/>
+          <circle cx="476.8" cy="295.4" r="4.5"/><circle cx="609.0" cy="322.1" r="4.5"/>
+        </g>
+        <text class="endlbl" x="620" y="320" fill="var(--sig-1)">0.48</text>
+
+        <!-- hit targets -->
+        <g class="hit">
+          <circle cx="84.4"  cy="35.4"  r="13" data-t="60 mm · σ 0.93 → 20.44 mm"/>
+          <circle cx="360.6" cy="99.2"  r="13" data-t="140 mm · σ 0.93 → 8.87 mm"/>
+          <circle cx="476.8" cy="124.8" r="13" data-t="200 mm · σ 0.93 → 6.34 mm"/>
+          <circle cx="609.0" cy="152.1" r="13" data-t="300 mm · σ 0.93 → 4.44 mm"/>
+          <circle cx="84.4"  cy="122.2" r="13" data-t="60 mm · σ 0.30 → 6.56 mm"/>
+          <circle cx="360.6" cy="185.7" r="13" data-t="140 mm · σ 0.30 → 2.86 mm — over the bar"/>
+          <circle cx="476.8" cy="211.5" r="13" data-t="200 mm · σ 0.30 → 2.04 mm"/>
+          <circle cx="609.0" cy="238.6" r="13" data-t="300 mm · σ 0.30 → 1.43 mm"/>
+          <circle cx="84.4"  cy="206.4" r="13" data-t="60 mm · σ 0.10 → 2.18 mm"/>
+          <circle cx="360.6" cy="269.9" r="13" data-t="140 mm · σ 0.10 → 0.95 mm"/>
+          <circle cx="476.8" cy="295.4" r="13" data-t="200 mm · σ 0.10 → 0.68 mm"/>
+          <circle cx="609.0" cy="322.1" r="13" data-t="300 mm · σ 0.10 → 0.48 mm"/>
+        </g>
+      </svg>
+    </div>
+    <figcaption>
+      Log–log. Only the σ = 0.30 mm line at 140 mm is labelled in place — the rest are on the axis and
+      in the table. The toy sits comfortably under the bar at the same 140 mm; Alex does not, purely
+      because its pelvis-to-foot reach is 0.89 m against the toy's 0.6 m. §1's "120–150 mm" has no
+      lever arm in it.
+    </figcaption>
+    <details class="tbl">
+      <summary>Table view</summary>
+      <table>
+        <caption>Held-out marker RMS (mm), 3-seed mean. Bold row is the recommended bracket width.</caption>
+        <thead><tr><th>Spread</th><th class="num">σ 0.93</th><th class="num">σ 0.30</th><th class="num">σ 0.10</th></tr></thead>
+        <tbody>
+          <tr><td>60 mm</td><td class="num">20.44</td><td class="num">6.56</td><td class="num">2.18</td></tr>
+          <tr class="hi"><td><strong>140 mm</strong></td><td class="num">8.87</td><td class="num"><strong>2.86</strong></td><td class="num">0.95</td></tr>
+          <tr><td>200 mm</td><td class="num">6.34</td><td class="num">2.04</td><td class="num">0.68</td></tr>
+          <tr><td>300 mm</td><td class="num">4.44</td><td class="num">1.43</td><td class="num">0.48</td></tr>
+        </tbody>
+      </table>
+    </details>
+  </figure>
+
+  <div class="callout">
+    <span class="eyebrow">Actionable</span>
+    <p>To clear 2.2 mm on Alex you need a bracket of <strong>at least ~182 mm</strong> at σ = 0.3 mm,
+    or σ ≤ 0.23 mm at 140 mm. This is a bracket-design number you can act on before any hardware time.</p>
+  </div>
+</section>
+
+<section>
+  <h2>2 · A leg-only marker set leaves most of the robot on encoders</h2>
+  <p>
+    Unmarked links get their pose by FK chaining from the nearest marked ancestor (F7) — which
+    reintroduces exactly the encoder dependence F6 exists to remove. With pelvis and legs marked,
+    <strong>58.45 % of Alex's 91.5 kg</strong> has its pose from FK rather than markers.
+  </p>
+  <p>
+    <code>TORSO_LINK</code> alone is 22.21 kg — a quarter of the robot — chained through the single
+    <code>SPINE_Z</code> joint, which is <em>also</em> one of the filter's nine states.
+  </p>
+
+  <figure>
+    <div class="plot">
+      <svg viewBox="0 0 720 196" role="img" aria-label="Fraction of Alex's mass whose pose comes from FK rather than markers, for three marker sets.">
+        <g class="grid-line">
+          <line x1="238" y1="14" x2="238" y2="178"/>
+          <line x1="336" y1="14" x2="336" y2="178"/>
+          <line x1="434" y1="14" x2="434" y2="178"/>
+          <line x1="532" y1="14" x2="532" y2="178"/>
+          <line x1="630" y1="14" x2="630" y2="178"/>
+        </g>
+
+        <text class="barcat" x="0"  y="42">Pelvis + legs (7 clusters)</text>
+        <rect x="238" y="26" width="229.2" height="22" rx="4" fill="var(--sig-3)"/>
+        <text class="barlbl" x="477" y="42">53.49 kg · 58.45 %</text>
+
+        <text class="barcat" x="0"  y="102">All 13 leg links</text>
+        <rect x="238" y="86" width="202.2" height="22" rx="4" fill="var(--sig-2)"/>
+        <text class="barlbl" x="450" y="102">47.21 kg · 51.58 %</text>
+
+        <text class="barcat" x="0"  y="162">+ one torso cluster</text>
+        <rect x="238" y="146" width="134.0" height="22" rx="4" fill="var(--sig-1)"/>
+        <text class="barlbl" x="382" y="162">31.28 kg · 34.18 %</text>
+
+        <g class="axis-txt" text-anchor="middle">
+          <text x="238" y="192">0</text><text x="336" y="192">25</text>
+          <text x="434" y="192">50</text><text x="532" y="192">75</text><text x="630" y="192">100</text>
+        </g>
+        <text class="axis-ttl" x="238" y="10">% OF MASS POSED BY FK, NOT MARKERS</text>
+
+        <g class="hit">
+          <rect x="238" y="22" width="392" height="30" data-t="7 clusters — 53.4925 kg of 91.5126 chained"/>
+          <rect x="238" y="82" width="392" height="30" data-t="13 leg links — 47.2057 kg chained"/>
+          <rect x="238" y="142" width="392" height="30" data-t="+ torso — 31.2825 kg chained"/>
+        </g>
+      </svg>
+    </div>
+    <figcaption>
+      Marking every leg link instead of the realistic seven buys only 6.3 kg and makes layout recovery
+      <em>worse</em> (0.31 → 0.73 mm) — the hip stubs and ankle shims are 0.05–2.3 kg with short lever
+      arms. One torso cluster moves 22 kg. That is the highest-leverage addition after the gauge.
+    </figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>3 · A degenerate marker set looks perfect and is 57 mm wrong</h2>
+  <p>
+    PR2 predicted this from the joint axes alone: if every marked link merely <em>rotates about</em> a
+    common axis, a translation along that axis is an exact symmetry of the objective. Pelvis plus both
+    <code>HIP_X_LINK</code> is that case on Alex — both are <code>R_x(q)</code> with parallel axes.
+    Planted deliberately, on noiseless data:
+  </p>
+
+  <div class="pair">
+    <div>
+      <span class="k">What the fit reports</span>
+      <span class="v ok">0.112<span class="u">mm</span></span>
+      <span class="n">In-sample marker RMS. Exit code 0. G2 passes.
+      <code>isFullySolved()</code> returns true.</span>
+    </div>
+    <div>
+      <span class="k">How wrong it actually is</span>
+      <span class="v bad">57.3<span class="u">mm</span></span>
+      <span class="n">Every marker displaced by the same 55.9 mm vector along x. The y and z
+      components are 0.43 % of it.</span>
+    </div>
+  </div>
+
+  <div class="callout">
+    <span class="eyebrow">The part that matters</span>
+    <p>
+      <strong>σ₃ cannot detect this.</strong> The degenerate set reads 8.79e-4 m² against 2.21e-3 for an
+      identifiable one — a factor of 2.5, while the gap between two <em>both-identifiable</em> sets was
+      26. Identifiability has to be checked from the joint axes when the marker set is designed; it is
+      not recoverable from the data afterwards.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2>4 · The CoM is still as good as the URDF, not as good as the mocap</h2>
+  <p>
+    F11's budget on Alex's real inertial blocks. The two CAD-sourced terms outweigh the one term this
+    pipeline controls by <strong>33×</strong>, so perfect mocap would change the CoM by essentially
+    nothing.
+  </p>
+
+  <figure>
+    <div class="plot">
+      <svg viewBox="0 0 720 178" role="img" aria-label="CoM error budget: mass term 4.690 mm, link-CoM term 2.727 mm, mocap pose term 0.164 mm.">
+        <g class="grid-line">
+          <line x1="250" y1="12" x2="250" y2="152"/>
+          <line x1="345" y1="12" x2="345" y2="152"/>
+          <line x1="440" y1="12" x2="440" y2="152"/>
+          <line x1="535" y1="12" x2="535" y2="152"/>
+          <line x1="630" y1="12" x2="630" y2="152"/>
+        </g>
+
+        <text class="barcat" x="0" y="38">Mass × lever arm <tspan fill="var(--ink-3)">· CAD</tspan></text>
+        <rect x="250" y="24" width="356.4" height="20" rx="4" fill="var(--sig-3)"/>
+        <text class="barlbl" x="616" y="38">4.690 mm</text>
+
+        <text class="barcat" x="0" y="90">Link-CoM error <tspan fill="var(--ink-3)">· CAD</tspan></text>
+        <rect x="250" y="76" width="207.3" height="20" rx="4" fill="var(--sig-2)"/>
+        <text class="barlbl" x="467" y="90">2.727 mm</text>
+
+        <text class="barcat" x="0" y="142">Pose error <tspan fill="var(--ink-3)">· mocap</tspan></text>
+        <rect x="250" y="128" width="12.5" height="20" rx="4" fill="var(--crit)"/>
+        <text class="barlbl" x="272" y="142" fill="var(--crit)">0.164 mm</text>
+
+        <g class="axis-txt" text-anchor="middle">
+          <text x="250" y="168">0</text><text x="345" y="168">1.25</text>
+          <text x="440" y="168">2.5</text><text x="535" y="168">3.75</text><text x="630" y="168">5</text>
+        </g>
+        <text class="axis-ttl" x="250" y="8">CONTRIBUTION TO CoM ERROR (mm)</text>
+
+        <g class="hit">
+          <rect x="250" y="20" width="380" height="28" data-t="mass × lever arm — 4.690 mm at 5 % mass uncertainty"/>
+          <rect x="250" y="72" width="380" height="28" data-t="link-CoM — 2.727 mm at 5 mm/axis"/>
+          <rect x="250" y="124" width="380" height="28" data-t="mocap pose — 0.164 mm, the only controlled term"/>
+        </g>
+      </svg>
+    </div>
+    <figcaption>
+      The red bar is the only term markers can improve. Weighing the robot constrains the largest one
+      in minutes; the force-plate stage (§16) is the only thing that converts either CAD term from
+      assumed to measured. Uncertainties here are <code>ReplayRunner</code> defaults — 5 % and 5 mm —
+      assumed, not measured.
+    </figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>What to be wary of</h2>
+  <ul class="plain">
+    <li><strong>SCS2 silently rewrites link frames.</strong> <code>transformAllFramesToZUp()</code>
+      defaults to on, zeroing each joint's rotation and compensating in the axis and inertia. Physics
+      preserved, frame identity not — so my PR2 javadoc claim that a calibrated <code>^i p̂_ij</code>
+      is "directly comparable to a CAD marker position" is <strong>false above the legs</strong>. True
+      for the legs only because they all have <code>rpy="0 0 0"</code>.</li>
+    <li><strong>The 1.0 mm layout threshold is seed-sensitive</strong> — that statistic ranges
+      0.45–2.47 mm across 10 seeds, driven by the unaveraged reference-capture noise. A known
+      mechanism, not a flake, but don't read one run as precise.</li>
+    <li><strong>The TALOS-bar assertion has ~30 % margin</strong> after 3-seed averaging. One seed put
+      it at 2.2004 mm against a 2.2000 mm bar; the agent refused to ship that and averaged instead.</li>
+    <li><strong>G2 does not fire on a 0.5° hip offset at σ = 0.3 mm</strong> — floored by Alex's own
+      gauge error — and when it does fire it lights both branches, not one. Weaker localisation than
+      on the toy.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>What I would do next</h2>
+  <ol class="next">
+    <li><strong>Decide the §3 CAD-comparability wording.</strong> It is a spec claim now known false
+      above the legs, and it was one of the two amendments already flagged on PR #2.</li>
+    <li><strong>Re-spec the pelvis bracket at ≥182 mm.</strong> Cheapest accuracy available, and now
+      quantified rather than recommended.</li>
+    <li><strong>Add a torso cluster.</strong> 22.2 kg off encoders, and <code>SPINE_Z</code> is a
+      filter state.</li>
+    <li><strong>Weigh the robot.</strong> Minutes, and it constrains the single largest term in the
+      CoM budget.</li>
+  </ol>
+</section>
+
+<footer>
+  Branch <code>pr4-alex-demo</code>, off <code>pr3</code>. Full write-up in
+  <code>.claude-reports/2026-08-10-alex-leg-demo.md</code>. Numbers are from a clean
+  <code>./gradlew clean build --rerun-tasks</code> — 168 tests, 0 failures, 0 skipped.
+</footer>
+
+</div>
+
+<div id="tip" role="status" aria-live="polite"></div>
+<script>
+  const tip = document.getElementById('tip');
+  for (const el of document.querySelectorAll('[data-t]')) {
+    el.addEventListener('mouseenter', e => {
+      tip.textContent = el.dataset.t;
+      tip.style.opacity = '1';
+    });
+    el.addEventListener('mousemove', e => {
+      tip.style.left = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 10) + 'px';
+      tip.style.top  = (e.clientY - tip.offsetHeight - 12) + 'px';
+    });
+    el.addEventListener('mouseleave', () => { tip.style.opacity = '0'; });
+  }
+</script>

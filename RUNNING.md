@@ -789,6 +789,183 @@ The G3 gate (`VolumeDistortionGate`) is still an empty placeholder — it needs 
 two-marker artifact carried through the volume, which is a hardware procedure rather than a
 software one.
 
+## The live ghost on the hardware visualizer
+
+Everything else in this document reads from a **file**: a logged CSV replayed offline, or a
+simulated camera inside `AlexMocapGroundTruthTrack`. The live ghost is the other end of that —
+`NatNetMocapSource.onFrameReceived` wired to a network, with the result drawn next to the real
+robot in real time, so a disagreement between the mocap reconstruction and the robot's own
+estimator is something you *see* during a gantry session rather than something you discover in
+post-processing.
+
+The code lives in the **`alex`** repository (`us.ihmc.alex.mocapGhost` plus
+`AlexMocapSCS2Visualizer`), because it depends on the hardware visualizer. It is documented here
+because everything it configures — the calibration, the labelling, the world tilt — is an
+`alex-mocap` concept. `alex/RUNNING.md` covers the build; `BRINGUP.md` in this repository covers
+what has to happen in the real world first, ordered by lead time.
+
+### The four decisions, as decisions
+
+These were settled deliberately and the implementation follows them exactly. If one of them looks
+wrong later, change it here first — each one is doing work.
+
+1. **Ghost pose = mocap pelvis (F6 → F10) + *encoder* joint angles.** No IK anywhere. The visible
+   offset between ghost and robot therefore *is* the pelvis pose error — the estimator-validation
+   quantity — rather than a blend of that and a fitting residual. Unmarked links inherit encoder
+   error (F7), which `getChainedMass()` already quantifies.
+2. **Pin mode.** Floating ⇒ the ghost's *translation* is the real robot's pelvis translation; on
+   the ground ⇒ it is mocap's. **Orientation is always mocap's.** A clean overlay while the robot
+   hangs in the gantry, and one informative jump on release. Which way it is facing is meaningful
+   even while hanging; where in the room it is, is not.
+3. **The ground plane is Motive's calibrated floor**, `z = 0` in the Motive frame, drawn as a
+   static visual. This asserts exactly what Motive's L-frame calibration already asserts and
+   nothing more — no plane fitting, no inference from where the feet are. The tilt still comes
+   from an explicit `TiltMeasurement`.
+4. **The wire format is `alex_msgs/MocapMarkerArray`**, BEST_EFFORT. The publisher contract is in
+   `ihmc-alex-sdk/alex-ros2/alex_msgs/MOCAP_STREAMING.md`; it is the only document the other side
+   reads.
+
+### Configuration
+
+One JSON file. `-Dalex.mocapGhost.config=<path>`, default `~/.ihmc/alexMocapGhost.json`.
+**A missing or bad file disables the ghost with a reason shown in its pane, and the visualizer
+behaves exactly like `AlexSCS2Visualizer`.** `MocapGhostConfiguration.load` never throws — it runs
+inside a JavaFX session-changed callback in a visualizer someone is using to bring up a robot, and
+an exception there would cost them their startup panel.
+
+```json
+{
+  "formatVersion": 1,
+  "calibration": "alex002-2026-08-11.json",
+  "labeling":    "alex002-2026-08-11.labels",
+  "topic": "mocap_markers",
+  "domainId": 42,
+  "worldTilt": { "method": "PRECISION_LEVEL", "aboutXDegrees": 0.041, "aboutYDegrees": -0.012,
+                 "note": "Starrett 98 on gantry base plate, 2026-08-11" },
+  "contact":   { "mode": "AUTO", "booleanNameSuffix": "HasFootHitGroundFiltered",
+                 "loadNameSuffix": "FootLoadPercentage", "loadThreshold": 0.15, "dwellTicks": 20 },
+  "estimator": { "sigma2Fraction": 0.25, "minimumVisibleMarkers": 3 },
+  "markerAcceptance": { "acceptPointCloudSolved": false, "acceptModelSolved": false },
+  "staleTimeoutSeconds": 0.5,
+  "floor": { "halfExtentMetres": 3.0, "spacingMetres": 0.5, "draw": true },
+  "centerOfMass": false
+}
+```
+
+`domainId` is optional; omitted, the ghost uses whatever `~/.ihmc/jros2.properties` declares —
+**not** ROS 2's default of 0, which would silently put the ghost on a different domain from
+everything else the same operator is running. A domain mismatch is the quietest failure in this
+whole path: discovery never matches, nothing raises an error, and `ghostState` sits at
+`WAITING_FOR_MOCAP` looking exactly like a publisher that is not running.
+
+Relative paths resolve **against the config file**, not the working directory — Gradle forks a
+`JavaExec` in a directory nobody chose.
+
+Every field except `worldTilt` takes a `-Dalex.mocapGhost.<field>` override, dotted for nested ones
+(`-Dalex.mocapGhost.contact.dwellTicks=5`). **The tilt deliberately does not.** A tilt is a measured
+session constant that travels with the calibration, and a command-line flag invites typing a
+plausible number — the exact failure FRAMEWORK.md §11 exists to prevent.
+
+**Derived, never configured**, and it must stay that way:
+
+- marked links = `calibration.getLinkNames()`
+- the `MarkerCluster` list = one per `ClusterLayout`, exactly as `ReplayRunner.buildClusters` does.
+  A separately-configured cluster list is a way to silently disagree with the calibration.
+- marker set = `MarkerLabelingIO.read(labeling).getMarkers()`, then
+  `CalibrationResultIO.read(calibration, markerSet)` — which throws if the calibration names a
+  marker the labelling lacks. That check is free and catches "we recalibrated and changed the
+  marker set but kept the old `.labels` file".
+- joint order = the **session's** own `RobotDefinition`
+
+### Pin mode
+
+| `ghostPinMode` | Translation | Orientation |
+|---|---|---|
+| `AUTO` | real robot while floating, mocap once on the ground | mocap |
+| `PINNED` | real robot's pelvis | mocap |
+| `FREE` | mocap | mocap |
+
+Contact is **discovered, never assumed**: a suffix scan for `<prefix>HasFootHitGroundFiltered`
+(glitch-filtered) and `<prefix>FootLoadPercentage` (`fZ / robotTotalWeight`), symmetrically
+debounced over `dwellTicks`. **If nothing resolves, `AUTO` behaves as `PINNED`** and
+`ghostContactSourceResolved` says so. That is the conservative direction: a pinned ghost is a clean
+overlay that understates the disagreement, whereas a wrongly-freed ghost flies off to wherever
+Motive's origin happens to be and looks like a broken pipeline.
+
+`PINNED → FREE` latches `|mocap − robot|` into `ghostReleaseJump`. **No smoothing, no blending** — a
+blended release would hide exactly the disagreement the ghost exists to show.
+
+### What to watch, in order
+
+| Variable | Reading it |
+|---|---|
+| `ghostState` | `WAITING_FOR_MOCAP` → `PINNED`/`FREE`. Stuck at the first means no markers are arriving. |
+| `ghostMocapMinusRobotMagnitude` | published **every** tick, pinned or free. The headline number. |
+| `ghostReleaseJump` | latched on release. This is the number that answers "do the two worlds share an origin". |
+| `ghostRefusedClusterCount` | clusters F6 would not pose. Non-zero with good visibility points at the σ₂ threshold. |
+| `ghostVisibleMarkerCount` | should be your full labelled count. |
+| `ghostAgeSeconds` | seconds since the last message. Crossing `staleTimeoutSeconds` hides the ghost. |
+| `ghostDroppedFrames` | **climbing is expected.** The source keeps the latest frame only, and Motive runs faster than the session ticks. |
+| `ghostNeverUpdatedJointCount` | joints that resolved but never left 0.0. See the traps below. |
+| `ghostTickDurationMs` | auto-disables the ghost above a 1 ms rolling mean. |
+
+### Three-terminal smoke test — no cameras, no robot
+
+```bash
+# 1. something that serves YoVariables to connect to
+./gradlew :alex:alexMocapGroundTruthTrack
+
+# 2. the fork. Connect to localhost in SCS2's remote-session dialog.
+./gradlew :alex:alexMocapSCS2Visualizer -Dalex.mocapGhost.config=/tmp/ghost.json
+
+# 3. the invented marker stream
+./gradlew :alex:fakeMocapMarkerPublisher -Dalex.mocapGhost.config=/tmp/ghost.json \
+          --args="--occlude 0.1 --freeze 2"
+```
+
+`FakeMocapMarkerPublisher` reads the **same** configuration the ghost does and plants each marker at
+its *calibrated* position, so the reconstruction is the exact inverse of the planting. Its flags each
+break that in one named way: `--drift <m/s>` (the ghost walks away in `FREE`, stays put in `PINNED`),
+`--occlude <p>` (F6 refusal and hold-last-pose), `--freeze <s>` (the staleness edges), `--offset
+x,y,z` (a known origin disagreement, so `ghostReleaseJump` is known in advance), `--skew <ms>`.
+
+It lives in **test scope on purpose**, exactly as `AlexLegDemo` does: it invents measurements, and a
+tool that publishes plausible marker data onto the real topic is one mistaken launch away from a
+calibration solved against fiction.
+
+### Watch out for — the live ghost
+
+1. **The tick hook runs inside `Session.runTick()`'s `try/catch(Throwable)`, which pauses the
+   session on a throw.** A ghost bug would freeze an operator's live view of a robot on a gantry.
+   `MocapGhostPipeline.update()` therefore catches everything, counts it, and permanently disables
+   itself after ten. Test that property first and never regress it.
+2. **The `RobotDefinition` must be copied before recolouring.** `Session.getRobotDefinitions()`
+   hands back the instance the real robot is drawn from; recolouring in place turns the real robot
+   cyan, and there is no undo short of reconnecting. Materials are *replaced*, never mutated — a
+   URDF may share one `MaterialDefinition` between links.
+3. **`addYoGraphic` must follow `addChild`.** The graphic's joint strings are resolved against the
+   visualizer's mirror of the session registry. Resolving them before the variables exist yields a
+   graphic that is **silently inert** rather than one that reports a missing variable.
+4. **`GravityAlignedWorldFrame` needs a distinct `nameSuffix` per session.** Euclid rejects
+   duplicate frame names under one parent, so a fixed suffix works exactly once and the *second*
+   connection throws.
+5. **`RemoteSession` exposes no `getRobots()`** — only `LogSession` does. Encoders are read by name
+   as `q_<jointName>` (and `q_<rootJointName>_X/_Y/_Z` for the floating joint), which works because
+   `RobotModelLoader.setupRobotUpdater` does `rootRegistry.addChild(robot.getRegistry())`.
+   `RemoteEncoderReaderTest` pins that convention against the real Alex model at build time.
+6. **A joint present in the definition but absent from the handshake resolves and stays at 0.0
+   forever.** It reads cleanly and mis-poses the ghost with no indication anywhere. The reader
+   watches for joints that never leave zero and publishes `ghostNeverUpdatedJointCount`; a missing
+   joint *on a marked chain* refuses to enable the ghost at all, because a missing knee puts a whole
+   shank and foot somewhere else and reads as a mocap fault.
+7. **Scrubbing the buffer writes buffer contents back into session variables**, so `ghostPinMode`
+   appears to change by itself while you drag the slider. Expected, not a bug: it is SCS2 working
+   correctly on a variable that happens to be an input.
+8. **A refused pelvis holds the last good pose and never writes NaN** — deliberately the *opposite*
+   of `PelvisStateExtractor`, which correctly does not hold. The extractor is a measurement; the
+   ghost is a picture. NaN into a pose feeding a frame tree poisons it permanently. Both directions
+   are pinned by tests, so "fixing" one of them fails loudly.
+
 ## What is implemented
 
 ### `us.ihmc.alexMocap.core` — the data model
@@ -913,6 +1090,14 @@ There is deliberately **no `connect()` method that throws**. A method that compi
 at runtime reads as working code; the seam should be visible at the call site. Wiring it is a
 short adapter in whichever module has the client.
 
+**The seam now has a wired consumer, and it is still not a NatNet client.**
+`us.ihmc.alex.mocapGhost.MocapMarkerArraySubscriber` in the `alex` repository drives
+`onFrameReceived` from the ROS 2 topic `mocap_markers` — see *"The live ghost on the hardware
+visualizer"* above. That closes the gap between this class and a running visualizer, and it
+closes **none** of the gap to Motive: something still has to publish that topic, and the NatNet
+client remains the missing piece. The contract that something has to honour is written down in
+`ihmc-alex-sdk/alex-ros2/alex_msgs/MOCAP_STREAMING.md`.
+
 Per PR_PLAN this class gets no unit test for the connection itself — a mocked NatNet client
 tests the mock.
 
@@ -920,8 +1105,19 @@ tests the mock.
 
 1. Start Motive, load the session calibration, confirm the rigid bodies are defined and
    streaming (Data Streaming pane → NatNet enabled, note the transmission type and interface).
-2. Build a `MarkerLabeling` from Motive's streaming ids to your marker names. Log
-   `getUnfedMarkers()` — it must be empty before you go further.
+2. Write a `.labels` file mapping Motive's streaming ids to your marker names, and load it with
+   `MarkerLabelingIO.read(path)`. Log `getUnfedMarkers()` — it must be empty before you go
+   further. Two columns, comments and blank lines tolerated, `write` round-trips exactly:
+
+   ```
+   # alex-mocap marker labelling, format 1
+   # motiveId,markerName
+   1001,PELVIS_M0
+   1002,PELVIS_M1
+   ```
+
+   This is the same file the live ghost's configuration points `"labeling"` at, deliberately —
+   one labelling, one place it can be wrong.
 3. Wire the client's per-frame callback to `onFrameReceived` and construct
    `NatNetMocapSource`.
 4. Record 60 s at rest into a CSV via `MocapFrameRecorder`. Then check, in order:
@@ -1317,6 +1513,30 @@ command above if you bump either version.
 **The `17-` prefix in mecano's version is the Java flavor, not a major version.** Version
 ordering is `17-0.19.1` < `17-0.19.2`; do not read it as semver.
 
+### The mocap world origin is not the estimator's world origin
+
+The most likely first-run surprise with the live ghost, and it does not look like what it is.
+
+Motive's world origin is wherever the L-frame was placed during camera calibration. The robot's
+state estimator has its own origin, set by wherever it was told it started. **Nothing has ever
+required these to agree**, and until the ghost put both on one screen, nothing ever compared them.
+
+So the first time you press `FREE`, the ghost may be metres away from the robot. That reads as a
+catastrophically broken reconstruction. It is a registration problem, and the number that measures
+it is **`ghostReleaseJump`** — `|mocap − robot|` latched at the moment of release. Read that before
+concluding anything about the pipeline.
+
+Three things follow, and they are why pin mode exists at all:
+
+- `AUTO` is the default posture, and an unresolved contact detector degrades it to `PINNED` rather
+  than to `FREE`. Pinning understates a disagreement; freeing invents one.
+- `ghostMocapMinusRobotMagnitude` is published on **every** tick, pinned or free, so the number is
+  already on screen before anyone presses anything.
+- `ghostApplyPinOffsetAfterRelease` (default **false**) subtracts the latched offset while free, for
+  when you know the two origins differ by a setup constant and want to compare *shape* rather than
+  position. It is off by default because a ghost that silently corrects for the disagreement cannot
+  show you the disagreement.
+
 ### Layout accuracy is not `σ/√K`. It is set by the gauge cluster.
 
 This is the single most useful thing PR2 turned up, and it changes what hardware work is
@@ -1454,7 +1674,7 @@ Reports land in `build/reports/tests/test/index.html`; machine-readable results 
 `build/test-results/test/*.xml`. `testLogging` is configured to dump full stack traces on
 failure, so a CI log is enough to diagnose without fetching the report.
 
-Currently 168 tests, no external resources, no display, no hardware. Two URDFs are checked in
+Currently 238 tests, no external resources, no display, no hardware. Two URDFs are checked in
 — the toy 6-DOF one and the real Alex one — and nothing else is read from outside the repo:
 
 | Class | Covers |
@@ -1479,6 +1699,15 @@ Currently 168 tests, no external resources, no display, no hardware. Two URDFs a
 | `PackageDependencyTest` | the FRAMEWORK.md §19 dependency table, by scanning compiled class files; SCS2 containment against the external library; JavaFX and YoVariables confined to `scs2` |
 | `AlexLegDemoTest` | **the real 91.5 kg Alex model**: 29 joints / 30 links / finite inertials after the fixed-joint merge, SCS2's link-frame rewrite, noiseless exactness, σ = 0.3 mm and σ = 0.93 mm recovery, monotonicity, **the hip-X-only degeneracy**, narrow-sweep conditioning collapse, **58.45% chained mass**, CoM vs Mecano to 1e-9 on 91.5 kg, G2 clean / fired / floored, **the 140 mm bracket missing the TALOS bar** |
 | `AlexLegDemoCliTest` | both shipping CLIs unchanged on the real model, cluster inference producing exact URDF link names with no `--cluster`, and the degenerate marked set exiting 0 while being 56 mm wrong |
+| `mocap.MarkerLabelingIOTest` | exact round trip, duplicate id and duplicate name both rejected, comments and blank lines tolerated, sparse Motive ids preserved |
+
+The live ghost's tests live in the **`alex`** repository, under
+`alex/src/test/java/us/ihmc/alex/mocapGhost/` — run them with
+`./gradlew :alex:alex-test:test --tests '*mocapGhost*'` from the workspace root. The two worth
+knowing about from here are `RemoteEncoderReaderTest`, which pins the `q_<jointName>` convention
+against the real Alex model at build time rather than at 2 a.m. on the gantry, and
+`MocapGhostPipelineTest`, which closes the loop: markers planted at a known pelvis pose come back
+out of the ghost's YoVariables as that pose, to 1e-9 m.
 
 ### Reading the tests
 

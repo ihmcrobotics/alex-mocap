@@ -331,8 +331,12 @@ model leaves out):
 Read that table carefully, because the interesting rows are the misses.
 
 **A static CoP compares horizontal positions, so it is blind to mass sitting over the support.**
-The measured lever arms at a neutral stance are `TORSO_LINK` **0.03 m**, `LEFT_THIGH` 0.14 m,
-`LEFT_SHOULDER_Z_LINK` 0.32 m. Since
+The measured lever arms at the simulation's standing stance are `TORSO_LINK` **0.03 m**,
+`LEFT_THIGH` 0.14 m, `LEFT_SHOULDER_Z_LINK` 0.32 m — back-computed from the table above as
+`offset × M / Δmass`. On the vendored URDF at the *rest* pose they are 0.0277 / 0.1375 / 0.2700 m,
+which is what `MassConsistencyGateTest` pins directly off the model. The two differ because the
+posture and the model do; the ratio that matters — torso against everything else — is ~10× in both.
+Since
 
 ```
 CoP offset  ≈  (m_error / M) × lever

@@ -52,7 +52,10 @@ public class ReplayRunnerTest
 
       int calibrationExit = CalibrationRunner.run(new String[] {"--calibrate", "--input", directory.resolve("capture.csv").toString(), "--encoders",
             directory.resolve("encoders.csv").toString(), "--urdf", directory.resolve("toy.urdf").toString(), "--sigma", "0.0003", "--world-tilt", "0.08",
-            "--output", directory.resolve("calibration.json").toString()},
+            "--output", directory.resolve("calibration.json").toString(),
+            // This suite is about the replay CLI downstream of calibration, not about whether this
+            // particular synthetic capture set clears G4's real-hardware bar.
+            "--g4-threshold", "0.05"},
                                                   new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
                                                   new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
 
@@ -180,7 +183,7 @@ public class ReplayRunnerTest
       assertEquals(0,
                    CalibrationRunner.run(new String[] {"--calibrate", "--input", directory.resolve("capture.csv").toString(), "--encoders",
                          directory.resolve("encoders.csv").toString(), "--urdf", directory.resolve("toy.urdf").toString(), "--sigma", "0.0003", "--output",
-                         directory.resolve("calibration.json").toString()},
+                         directory.resolve("calibration.json").toString(), "--g4-threshold", "0.05"},
                                          new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
                                          new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8)));
 

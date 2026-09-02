@@ -64,7 +64,11 @@ public class CalibrateCliTest
 
       int exitCode = CalibrationRunner.run(new String[] {"--calibrate", "--input", directory.resolve("capture.csv").toString(), "--encoders",
             directory.resolve("encoders.csv").toString(), "--urdf", SyntheticCaptures.toyUrdfPath().toString(), "--gauge", "pelvis", "--sigma", "0.0003",
-            "--world-tilt", "0.08", "--output", directory.resolve("calibration.json").toString(), "--note", "cli test"},
+            "--world-tilt", "0.08", "--output", directory.resolve("calibration.json").toString(), "--note", "cli test",
+            // Not this test's concern: it checks the CLI produces a correct, round-trippable
+            // CalibrationResult, not whether this particular synthetic capture set clears G4's
+            // real-hardware bar. testG4FailsWhenTheThresholdIsTighterThanTheData covers that.
+            "--g4-threshold", "0.05"},
                                            new PrintStream(outBytes, true, StandardCharsets.UTF_8),
                                            new PrintStream(errBytes, true, StandardCharsets.UTF_8));
 
@@ -78,6 +82,8 @@ public class CalibrateCliTest
       assertTrue(out.contains("monotone            yes"), "J must be monotone.\n" + out);
       assertTrue(out.contains("in-sample RMS"), out);
       assertTrue(out.contains("G2"), "G2 should be reported after the fit.\n" + out);
+      assertTrue(out.contains("G4"), "G4 should be reported after the fit -- it is what --calibrate's own javadoc has always claimed.\n" + out);
+      assertTrue(out.contains("held-out RMS"), "G4's actual accuracy claim, not just its name, should appear.\n" + out);
       assertTrue(!out.contains("HIT ITERATION CAP"), "A' should converge on clean synthetic data.\n" + out);
 
       // The machine-readable artifact, read back through the PR1 reader.
@@ -107,7 +113,7 @@ public class CalibrateCliTest
 
       int exitCode = CalibrationRunner.run(new String[] {"--calibrate", "--input", directory.resolve("capture.csv").toString(), "--encoders",
             directory.resolve("encoders.csv").toString(), "--urdf", SyntheticCaptures.toyUrdfPath().toString(), "--sigma", "0.0003", "--output",
-            directory.resolve("calibration.json").toString()},
+            directory.resolve("calibration.json").toString(), "--g4-threshold", "0.05"},
                                            new PrintStream(outBytes, true, StandardCharsets.UTF_8),
                                            new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
 
@@ -128,7 +134,8 @@ public class CalibrateCliTest
       ByteArrayOutputStream outBytes = new ByteArrayOutputStream();
 
       int exitCode = CalibrationRunner.run(new String[] {"--calibrate", "--input", directory.resolve("capture.csv").toString(), "--encoders",
-            directory.resolve("encoders.csv").toString(), "--urdf", SyntheticCaptures.toyUrdfPath().toString(), "--sigma", "0.0003"},
+            directory.resolve("encoders.csv").toString(), "--urdf", SyntheticCaptures.toyUrdfPath().toString(), "--sigma", "0.0003", "--g4-threshold",
+            "0.05"},
                                            new PrintStream(outBytes, true, StandardCharsets.UTF_8),
                                            new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
 
@@ -157,6 +164,108 @@ public class CalibrateCliTest
 
       assertTrue(exitCode != 0, "A permuted joint order must not produce a calibration.");
       assertTrue(errBytes.toString(StandardCharsets.UTF_8).contains("Joint order mismatch"), errBytes.toString(StandardCharsets.UTF_8));
+   }
+
+   /**
+    * G4 on clean synthetic data: held-out and in-sample RMS should agree, and a threshold set well
+    * above both should pass.
+    */
+   @Test
+   public void testG4PassesOnCleanDataWithALooseThreshold(@TempDir Path directory) throws Exception
+   {
+      writeCaptureSet(directory, new SyntheticCaptures.Options().captures(30).noise(0.3e-3));
+
+      ByteArrayOutputStream outBytes = new ByteArrayOutputStream();
+
+      int exitCode = CalibrationRunner.run(new String[] {"--calibrate", "--input", directory.resolve("capture.csv").toString(), "--encoders",
+            directory.resolve("encoders.csv").toString(), "--urdf", SyntheticCaptures.toyUrdfPath().toString(), "--gauge", "pelvis", "--sigma", "0.0003",
+            "--g4-threshold", "0.05"},
+                                           new PrintStream(outBytes, true, StandardCharsets.UTF_8),
+                                           new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+
+      String out = outBytes.toString(StandardCharsets.UTF_8);
+      assertEquals(0, exitCode, "A loose 50 mm bar should pass on clean synthetic data.\n" + out);
+      assertTrue(out.contains("G4 holdout: 24 training / 6 held-out (every 5th capture)"),
+                 "Default --holdout-every 5 over 30 captures should split 24/6.\n" + out);
+   }
+
+   /** A threshold tighter than clean synthetic data can hit must make G4 -- and so the whole run -- fail. */
+   @Test
+   public void testG4FailsWhenTheThresholdIsTighterThanTheData(@TempDir Path directory) throws Exception
+   {
+      writeCaptureSet(directory, new SyntheticCaptures.Options().captures(30).noise(0.3e-3));
+
+      ByteArrayOutputStream outBytes = new ByteArrayOutputStream();
+
+      int exitCode = CalibrationRunner.run(new String[] {"--calibrate", "--input", directory.resolve("capture.csv").toString(), "--encoders",
+            directory.resolve("encoders.csv").toString(), "--urdf", SyntheticCaptures.toyUrdfPath().toString(), "--gauge", "pelvis", "--sigma", "0.0003",
+            "--g4-threshold", "1.0e-9"},
+                                           new PrintStream(outBytes, true, StandardCharsets.UTF_8),
+                                           new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+
+      String out = outBytes.toString(StandardCharsets.UTF_8);
+      assertEquals(1, exitCode, "An impossibly tight bar must fail the run, not be silently ignored.\n" + out);
+      assertTrue(out.contains("G4: FAIL") || out.contains("FAIL"), out);
+   }
+
+   /** --holdout-every controls the split, and it is visible in the printed summary. */
+   @Test
+   public void testHoldoutEveryControlsTheSplit(@TempDir Path directory) throws Exception
+   {
+      writeCaptureSet(directory, new SyntheticCaptures.Options().captures(30).noise(0.3e-3));
+
+      ByteArrayOutputStream outBytes = new ByteArrayOutputStream();
+
+      int exitCode = CalibrationRunner.run(new String[] {"--calibrate", "--input", directory.resolve("capture.csv").toString(), "--encoders",
+            directory.resolve("encoders.csv").toString(), "--urdf", SyntheticCaptures.toyUrdfPath().toString(), "--gauge", "pelvis", "--sigma", "0.0003",
+            "--holdout-every", "3", "--g4-threshold", "0.05"},
+                                           new PrintStream(outBytes, true, StandardCharsets.UTF_8),
+                                           new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+
+      String out = outBytes.toString(StandardCharsets.UTF_8);
+      assertEquals(0, exitCode, out);
+      assertTrue(out.contains("G4 holdout: 20 training / 10 held-out (every 3th capture)"),
+                 "Every 3rd of 30 captures held out should split 20/10.\n" + out);
+   }
+
+   /** Too few captures to hold out anything must skip G4 rather than crash or silently fabricate a result. */
+   @Test
+   public void testTooFewCapturesSkipsG4RatherThanCrashing(@TempDir Path directory) throws Exception
+   {
+      // Capture index 0 is held out no matter what --holdout-every is (0 mod n == 0 for any n), so
+      // a training set only goes empty when there is exactly one capture total.
+      writeCaptureSet(directory, new SyntheticCaptures.Options().captures(1).noise(0.3e-3));
+
+      ByteArrayOutputStream outBytes = new ByteArrayOutputStream();
+
+      int exitCode = CalibrationRunner.run(new String[] {"--calibrate", "--input", directory.resolve("capture.csv").toString(), "--encoders",
+            directory.resolve("encoders.csv").toString(), "--urdf", SyntheticCaptures.toyUrdfPath().toString(), "--gauge", "pelvis", "--sigma", "0.0003"},
+                                           new PrintStream(outBytes, true, StandardCharsets.UTF_8),
+                                           new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+
+      String out = outBytes.toString(StandardCharsets.UTF_8);
+      assertTrue(out.contains("G4 skipped"), "One capture leaves nothing to train on once it is held out; G4 must say so rather than crash.\n" + out);
+      assertTrue(!out.contains("G4: "), "A skipped gate must not also print a verdict.\n" + out);
+      // Exit 1 here comes from G2 (INCOMPLETE: it needs at least 3 captures per marker, unrelated
+      // to G4). The point of this test is that G4 degrades gracefully rather than throwing.
+      assertTrue(out.contains("G2: INCOMPLETE"), "This capture count is too small for G2 too, which is why exit is non-zero here.\n" + out);
+   }
+
+   /** --holdout-every must reject values that would leave nothing to train on. */
+   @Test
+   public void testHoldoutEveryRejectsLessThanTwo(@TempDir Path directory) throws Exception
+   {
+      writeCaptureSet(directory, new SyntheticCaptures.Options().captures(10).noise(0.3e-3));
+
+      ByteArrayOutputStream errBytes = new ByteArrayOutputStream();
+
+      int exitCode = CalibrationRunner.run(new String[] {"--calibrate", "--input", directory.resolve("capture.csv").toString(), "--encoders",
+            directory.resolve("encoders.csv").toString(), "--urdf", SyntheticCaptures.toyUrdfPath().toString(), "--sigma", "0.0003", "--holdout-every", "1"},
+                                           new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
+                                           new PrintStream(errBytes, true, StandardCharsets.UTF_8));
+
+      assertEquals(2, exitCode);
+      assertTrue(errBytes.toString(StandardCharsets.UTF_8).contains("at least 2"), errBytes.toString(StandardCharsets.UTF_8));
    }
 
    /** The encoder log must round-trip bit-exactly, like the mocap log it is paired with. */

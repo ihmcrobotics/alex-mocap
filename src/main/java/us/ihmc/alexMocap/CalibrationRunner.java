@@ -23,6 +23,7 @@ import us.ihmc.alexMocap.core.MarkerId;
 import us.ihmc.alexMocap.core.MocapFrame;
 import us.ihmc.alexMocap.gates.BootstrapSpreadGate;
 import us.ihmc.alexMocap.gates.GateRunner;
+import us.ihmc.alexMocap.gates.HeldOutResidualGate;
 import us.ihmc.alexMocap.gates.RigidityGate;
 import us.ihmc.alexMocap.mocap.CsvReplayMocapSource;
 import us.ihmc.alexMocap.model.RobotModelHandle;
@@ -198,10 +199,77 @@ public class CalibrationRunner
                                          clusterPoses(tracking, captureSet.getCaptureCount()),
                                          arguments.sigma));
 
+      addHeldOutGate(runner, arguments, captureSet, model, tracking, clusters, out);
+
       GateRunner.Report gateReport = runner.runAll();
       out.print(gateReport.format());
 
       return gateReport.isPassed() ? EXIT_PASS : EXIT_GATE_NOT_PASSED;
+   }
+
+   /**
+    * G4: withhold every {@code arguments.holdoutEvery}-th capture, fit A' on the rest, and report
+    * how well that fit predicts the withheld ones. FRAMEWORK.md §15: "In-sample residuals are not
+    * an accuracy claim. This is the number worth quoting."
+    * <p>
+    * The gauge tracking is the one already computed for the full-data fit, reused rather than
+    * recomputed for the training subset -- {@link AlternatingCalibrator#calibrate(CaptureSet,
+    * RobotModelHandle, BaseInitializer.GaugeTracking, int[], CalibrationReport)}'s own javadoc: doing
+    * otherwise "would change the Delta convention between splits and make their layouts
+    * incomparable." Held out by index modulo, not by a random draw or a chronological tail split, so
+    * the withheld captures are spread across whatever pose diversity the whole set has rather than
+    * concentrated in however the operator happened to capture last.
+    * </p>
+    */
+   private static void addHeldOutGate(GateRunner runner,
+                                      Arguments arguments,
+                                      CaptureSet captureSet,
+                                      RobotModelHandle model,
+                                      BaseInitializer.GaugeTracking tracking,
+                                      List<MarkerCluster> clusters,
+                                      PrintStream out)
+   {
+      List<Integer> trainingIndices = new ArrayList<>();
+      List<Capture> heldOutCaptures = new ArrayList<>();
+      List<RigidBodyTransformReadOnly> heldOutPoses = new ArrayList<>();
+
+      for (int k = 0; k < captureSet.getCaptureCount(); k++)
+      {
+         if (k % arguments.holdoutEvery == 0)
+         {
+            heldOutCaptures.add(captureSet.getCapture(k));
+            heldOutPoses.add(tracking.isUsable(k) ? tracking.getClusterToWorld(k) : null);
+         }
+         else
+         {
+            trainingIndices.add(k);
+         }
+      }
+
+      if (heldOutCaptures.isEmpty() || trainingIndices.isEmpty())
+      {
+         out.println("G4 skipped: " + captureSet.getCaptureCount() + " captures is too few to hold out every " + arguments.holdoutEvery
+                     + "th and still have both a training and a held-out set. Capture more, or pass --holdout-every with a smaller value.");
+         out.println();
+         return;
+      }
+
+      int[] training = trainingIndices.stream().mapToInt(Integer::intValue).toArray();
+
+      CalibrationReport heldOutReport = new CalibrationReport();
+      CalibrationResult heldOutCalibration = new AlternatingCalibrator().calibrate(captureSet, model, tracking, training, heldOutReport);
+
+      out.println("G4 holdout: " + training.length + " training / " + heldOutCaptures.size() + " held-out (every " + arguments.holdoutEvery
+                  + "th capture)");
+      out.println();
+
+      runner.add(new HeldOutResidualGate(heldOutCaptures,
+                                         clusters,
+                                         model,
+                                         heldOutCalibration,
+                                         heldOutPoses,
+                                         heldOutReport.getOverallRmsMeters(),
+                                         arguments.g4ThresholdMeters));
    }
 
    private static List<RigidBodyTransformReadOnly> clusterPoses(BaseInitializer.GaugeTracking tracking, int captureCount)
@@ -425,6 +493,14 @@ public class CalibrationRunner
                                    margin, not 3x.
               --min-samples <n>    co-visible frames a pair needs before it is judged.
                                    Default 100. Below this a pair is reported NOT EVALUATED.
+              --holdout-every <n>  G4: hold out every nth capture (by index) from the fit,
+                                   fit on the rest, and report how well that fit predicts
+                                   the withheld ones. Default 5 (~20% held out). Must be
+                                   at least 2. In-sample residuals are not an accuracy
+                                   claim; this is (FRAMEWORK.md §15).
+              --g4-threshold <metres>   G4's bar. Default 0.0022 (2.2 mm, TALOS
+                                   cross-validated -- literature, not a measurement of
+                                   this robot).
               --help
 
             Exit codes:
@@ -448,6 +524,8 @@ public class CalibrationRunner
       double sigma = Double.NaN;
       double sigmaMultiplier = RigidityGate.DEFAULT_SIGMA_MULTIPLIER;
       int minimumSamples = RigidityGate.DEFAULT_MINIMUM_SAMPLES;
+      int holdoutEvery = 5;
+      double g4ThresholdMeters = HeldOutResidualGate.TALOS_CROSS_VALIDATED_RMS_METERS;
       List<String> clusterSpecs = new ArrayList<>();
       boolean help = false;
 
@@ -478,6 +556,8 @@ public class CalibrationRunner
                case "--sigma" -> arguments.sigma = positiveDouble(value(args, ++i, "--sigma"), "--sigma");
                case "--sigma-multiplier" -> arguments.sigmaMultiplier = positiveDouble(value(args, ++i, "--sigma-multiplier"), "--sigma-multiplier");
                case "--min-samples" -> arguments.minimumSamples = Integer.parseInt(value(args, ++i, "--min-samples"));
+               case "--holdout-every" -> arguments.holdoutEvery = positiveInt(value(args, ++i, "--holdout-every"), "--holdout-every");
+               case "--g4-threshold" -> arguments.g4ThresholdMeters = positiveDouble(value(args, ++i, "--g4-threshold"), "--g4-threshold");
                case "--cluster" -> arguments.clusterSpecs.add(value(args, ++i, "--cluster"));
                default -> throw new IllegalArgumentException("unknown option '" + args[i] + "'");
             }
@@ -504,6 +584,25 @@ public class CalibrationRunner
             throw new IllegalArgumentException(option + " needs a value");
 
          return args[index];
+      }
+
+      private static int positiveInt(String text, String option)
+      {
+         int value;
+
+         try
+         {
+            value = Integer.parseInt(text);
+         }
+         catch (NumberFormatException e)
+         {
+            throw new IllegalArgumentException(option + " expects an integer, got '" + text + "'");
+         }
+
+         if (value < 2)
+            throw new IllegalArgumentException(option + " must be at least 2 (every 1st capture held out would leave nothing to train on), got " + value);
+
+         return value;
       }
 
       private static double positiveDouble(String text, String option)

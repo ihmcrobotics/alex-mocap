@@ -50,6 +50,9 @@ import us.ihmc.mecano.tools.MultiBodySystemTools;
  * <p>
  * The practical consequence: a calibrated {@code ^i p̂_ij} printed by this pipeline is directly
  * comparable to a CAD marker position, which is what makes a layout auditable by a human.
+ * <b>This promise depends on {@link URDFLoader}'s choice of {@code transformToZUp} and does not
+ * hold for a link below a non-zero-{@code rpy} joint</b> -- see {@link URDFLoader}'s javadoc for why,
+ * and {@code CalibrationRunner.warnIfClustersAreZUpRewritten} for the check that catches it.
  * </p>
  *
  * <h2>The floating joint SCS2 adds, and why it does not contaminate FK</h2>
@@ -191,6 +194,19 @@ public class RobotModelHandle
    public static RobotModelHandle fromURDF(Path urdfFile) throws IOException
    {
       return new RobotModelHandle(URDFLoader.load(urdfFile));
+   }
+
+   /**
+    * Diagnostic-only twin of {@link #fromURDF}: the same URDF, but with SCS2's Z-up rewrite turned
+    * off, so every link keeps the URDF's own frame instead of having a non-zero-{@code rpy} joint's
+    * rotation folded away. See {@link URDFLoader#loadWithoutZUpRewrite} for why this exists --
+    * comparing a link's {@link #packLinkToBase} here against the same link from {@link #fromURDF} is
+    * how {@code CalibrationRunner.warnIfClustersAreZUpRewritten} finds out which links the rewrite
+    * actually moved. Never solve a calibration against this instance.
+    */
+   public static RobotModelHandle fromURDFWithoutZUpRewrite(Path urdfFile) throws IOException
+   {
+      return new RobotModelHandle(URDFLoader.loadWithoutZUpRewrite(urdfFile, ReferenceFrame.getWorldFrame()));
    }
 
    /** One-DoF joint names of a tree, in the order this class indexes them. */

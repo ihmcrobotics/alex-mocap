@@ -28,6 +28,8 @@ import us.ihmc.alexMocap.gates.RigidityGate;
 import us.ihmc.alexMocap.mocap.CsvReplayMocapSource;
 import us.ihmc.alexMocap.model.RobotModelHandle;
 import us.ihmc.alexMocap.model.URDFLoader;
+import us.ihmc.euclid.axisAngle.AxisAngle;
+import us.ihmc.euclid.transform.RigidBodyTransform;
 import us.ihmc.euclid.transform.interfaces.RigidBodyTransformReadOnly;
 
 /**
@@ -134,6 +136,7 @@ public class CalibrationRunner
       {
          markers = source.getMarkers();
          clusters = arguments.clusterSpecs.isEmpty() ? inferClusters(markers) : buildClusters(arguments.clusterSpecs, markers);
+         warnIfClustersAreZUpRewritten(arguments.urdf, model, clusters, out);
 
          while (!source.isFinished() && captures.size() < encoderSamples.size())
          {
@@ -443,6 +446,59 @@ public class CalibrationRunner
 
       boolean anyThin = clusters.stream().anyMatch(cluster -> !cluster.hasRecommendedRedundancy());
       return description + (anyThin ? "   (* fewer than 4 markers: no redundancy for G1 to check)" : "");
+   }
+
+   /**
+    * Warns if a cluster is mounted on a link SCS2's default Z-up rewrite has rotated away from the
+    * URDF's own link frame ({@link URDFLoader}'s javadoc, "SCS2 rewrites the URDF's link frames"):
+    * {@link RobotModelHandle}'s promise that a calibrated pose is "directly comparable to a CAD
+    * marker position" does not hold there.
+    * <p>
+    * Every joint above the leg/pelvis clusters this pipeline has run on so far declares
+    * {@code rpy="0 0 0"}, so this has been a no-op in practice -- but silently, and a future
+    * arm-mounted cluster (Alex's arm joints do NOT declare zero rpy) would misregister without any
+    * signal that something is wrong. This check is what turns that into a printed warning instead.
+    * </p>
+    * <p>
+    * <b>Why this needs a second model, not just {@code model} alone:</b> the whole point of the
+    * rewrite is to make every link's frame report base-aligned at {@code q = 0} -- rewritten and
+    * un-rewritten links are equally "identity" by the time they reach {@code model}, so nothing
+    * about {@code model} in isolation can tell them apart. {@link RobotModelHandle#fromURDFWithoutZUpRewrite}
+    * loads the same file with the rewrite off, and a link the rewrite actually touched will disagree
+    * with {@code model} there; a zero-rpy link (every leg/pelvis link, today) will not.
+    * </p>
+    * <p>
+    * Checked at {@code q = 0} deliberately: the rewrite folds each joint's own rotation into its
+    * children, so the accumulated rotation from base to a link is the same at every {@code q} -- a
+    * property of the URDF, not of the configuration.
+    * </p>
+    */
+   static void warnIfClustersAreZUpRewritten(Path urdfFile, RobotModelHandle model, List<MarkerCluster> clusters, PrintStream out) throws IOException
+   {
+      RobotModelHandle rawModel = RobotModelHandle.fromURDFWithoutZUpRewrite(urdfFile);
+      model.setQ(new double[model.getJointCount()]);
+      model.updateFrames();
+      rawModel.setQ(new double[rawModel.getJointCount()]);
+      rawModel.updateFrames();
+
+      RigidBodyTransform rewrittenLinkToBase = new RigidBodyTransform();
+      RigidBodyTransform rawLinkToBase = new RigidBodyTransform();
+
+      for (MarkerCluster cluster : clusters)
+      {
+         model.packLinkToBase(cluster.getLinkName(), rewrittenLinkToBase);
+         rawModel.packLinkToBase(cluster.getLinkName(), rawLinkToBase);
+
+         RigidBodyTransform difference = new RigidBodyTransform(rawLinkToBase);
+         difference.multiplyInvertOther(rewrittenLinkToBase);
+         double angleDegrees = Math.toDegrees(Math.abs(new AxisAngle(difference.getRotation()).getAngle()));
+
+         if (angleDegrees > 1.0e-6)
+            out.println("warning: cluster '" + cluster.getLinkName() + "' sits below a non-zero-rpy joint; SCS2's default "
+                  + "transformToZUp rewrite has rotated its frame " + String.format("%.3f", angleDegrees) + " deg away from the URDF's "
+                  + "own link frame. The calibrated pose will NOT be directly comparable to a CAD marker position "
+                  + "(RobotModelHandle javadoc).");
+      }
    }
 
    private static void printUsage(PrintStream stream)

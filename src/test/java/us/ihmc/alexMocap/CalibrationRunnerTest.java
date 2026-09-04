@@ -248,4 +248,36 @@ public class CalibrationRunnerTest
       assertEquals(0, pass);
       assertEquals(1, fail);
    }
+
+   /**
+    * {@link CalibrationRunner#warnIfClustersAreZUpRewritten} on the real Alex URDF (the toy fixture
+    * used everywhere else in this suite declares {@code rpy="0 0 0"} throughout, so it cannot
+    * exercise this at all -- see {@code AlexLegDemoTest.testLinkFramesAreBaseAlignedAtZeroBecauseScs2RewritesThem}).
+    * A leg cluster is unaffected by SCS2's Z-up rewrite; an arm cluster is, and must be warned about.
+    * <p>
+    * The check cannot work by inspecting the rewritten model alone -- the whole point of the rewrite
+    * is to make every link report base-aligned at {@code q = 0}, rewritten or not -- so this also
+    * pins down that {@code warnIfClustersAreZUpRewritten} is comparing against
+    * {@link us.ihmc.alexMocap.model.RobotModelHandle#fromURDFWithoutZUpRewrite}, not just reading
+    * {@code model} in isolation.
+    * </p>
+    */
+   @Test
+   public void testWarnsOnlyForClustersBelowANonZeroRpyJoint() throws Exception
+   {
+      Path urdf = us.ihmc.alexMocap.calibration.RobotCaptures.alexUrdfPath();
+      us.ihmc.alexMocap.model.RobotModelHandle model = us.ihmc.alexMocap.calibration.RobotCaptures.alexModel();
+      MarkerCluster legCluster = new MarkerCluster("PELVIS_LINK", MarkerId.createDenseSet("A_1", "A_2", "A_3", "A_4"));
+      MarkerCluster armCluster = new MarkerCluster("LEFT_SHOULDER_Y_LINK", MarkerId.createDenseSet("B_1", "B_2", "B_3", "B_4"));
+
+      ByteArrayOutputStream outBytes = new ByteArrayOutputStream();
+      CalibrationRunner.warnIfClustersAreZUpRewritten(urdf, model, List.of(legCluster), new PrintStream(outBytes, true, StandardCharsets.UTF_8));
+      assertEquals("", outBytes.toString(StandardCharsets.UTF_8), "a zero-rpy leg cluster must not be warned about");
+
+      outBytes.reset();
+      CalibrationRunner.warnIfClustersAreZUpRewritten(urdf, model, List.of(armCluster), new PrintStream(outBytes, true, StandardCharsets.UTF_8));
+      String armWarning = outBytes.toString(StandardCharsets.UTF_8);
+      assertTrue(armWarning.contains("LEFT_SHOULDER_Y_LINK"), armWarning);
+      assertTrue(armWarning.contains("transformToZUp"), armWarning);
+   }
 }

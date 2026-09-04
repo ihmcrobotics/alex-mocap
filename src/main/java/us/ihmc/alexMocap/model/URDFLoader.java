@@ -45,6 +45,26 @@ import us.ihmc.scs2.definition.robot.urdf.items.URDFModel;
  * loader so the hash is taken from the same bytes that were parsed, rather than recomputed later
  * from a path that may by then point somewhere else.
  * </p>
+ *
+ * <h2>This loader's SCS2 default rewrites link frames, and the ghost's model turns it off</h2>
+ * <p>
+ * {@link #load} calls {@code URDFTools.toRobotDefinition(urdfModel)} with no parser properties,
+ * which leaves {@code transformToZUp} at SCS2's default of {@code true}: every joint's own rotation
+ * is zeroed and folded into its children, so a link below a non-zero-{@code rpy} joint gets a frame
+ * that is <b>not</b> the URDF's own link frame (see {@code AlexLegDemoTest}'s
+ * {@code testLinkFramesAreBaseAlignedAtZeroBecauseScs2RewritesThem} for the worked example on Alex's
+ * arms). {@code alex}'s own robot model ({@code AlexModelFactory}, used by the mocap ghost and the
+ * live robot) explicitly sets {@code transformToZUp(false)} instead -- the two repos load the same
+ * URDF two different ways.
+ * </p>
+ * <p>
+ * This is harmless today: every marker cluster this pipeline calibrates sits on the leg/pelvis
+ * chain, which declares {@code rpy="0 0 0"} throughout, so the rewrite is a no-op there and
+ * {@link RobotModelHandle}'s promise that a calibrated pose is comparable to a CAD marker position
+ * holds. It stops being harmless the moment a cluster is mounted on a link below a non-zero-rpy
+ * joint (an arm, on this URDF) -- {@code CalibrationRunner.warnIfClustersAreZUpRewritten} is the
+ * check that turns that future mistake into a printed warning instead of a silent misregistration.
+ * </p>
  */
 public final class URDFLoader
 {
@@ -89,6 +109,29 @@ public final class URDFLoader
     */
    public static RigidBodyBasics load(Path urdfFile, ReferenceFrame parentFrame) throws IOException
    {
+      return load(urdfFile, parentFrame, true);
+   }
+
+   /**
+    * Loads the same URDF as {@link #load(Path, ReferenceFrame)}, but with SCS2's Z-up rewrite
+    * turned OFF -- every joint keeps its own declared {@code rpy} instead of having it zeroed and
+    * folded into its children.
+    * <p>
+    * <b>Diagnostic-only.</b> This exists so {@code CalibrationRunner.warnIfClustersAreZUpRewritten}
+    * can compare a link's frame here against its frame from the production {@link #load}, to find
+    * out which links the rewrite actually moved. Nothing in the calibration algorithm itself should
+    * ever call this -- {@link RobotModelHandle}'s "comparable to a CAD marker position" promise is
+    * specifically about the rewritten frames {@link #load} produces, because that is what a
+    * calibration is solved against.
+    * </p>
+    */
+   static RigidBodyBasics loadWithoutZUpRewrite(Path urdfFile, ReferenceFrame parentFrame) throws IOException
+   {
+      return load(urdfFile, parentFrame, false);
+   }
+
+   private static RigidBodyBasics load(Path urdfFile, ReferenceFrame parentFrame, boolean transformToZUp) throws IOException
+   {
       if (urdfFile == null)
          throw new IllegalArgumentException("URDF path must not be null.");
       if (!Files.isRegularFile(urdfFile))
@@ -116,7 +159,16 @@ public final class URDFLoader
          throw new IOException("Failed to parse URDF at " + urdfFile.toAbsolutePath() + ": " + describeCause(e), e);
       }
 
-      RobotDefinition robotDefinition = URDFTools.toRobotDefinition(urdfModel);
+      RobotDefinition robotDefinition;
+
+      if (transformToZUp)
+         robotDefinition = URDFTools.toRobotDefinition(urdfModel);
+      else
+      {
+         URDFTools.URDFParserProperties parserProperties = new URDFTools.URDFParserProperties();
+         parserProperties.setTransformToZUp(false);
+         robotDefinition = URDFTools.toRobotDefinition(urdfModel, parserProperties);
+      }
 
       if (robotDefinition.getRootBodyDefinition() == null)
          throw new IllegalArgumentException("URDF at " + urdfFile.toAbsolutePath() + " has no root link.");

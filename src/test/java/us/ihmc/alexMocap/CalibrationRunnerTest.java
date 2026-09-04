@@ -176,6 +176,141 @@ public class CalibrationRunnerTest
    }
 
    /** {@code totalDrift} is applied as a step at the midpoint: a mount that slips, not one that creeps. */
+   private static final List<MarkerId> WAND_MARKERS = MarkerId.createDenseSet("WAND_1", "WAND_2");
+   private static final double WAND_LENGTH = 0.500;
+
+   /**
+    * {@code CalibrationRunner --gate g3}, end to end: a wand capture written by
+    * {@link MocapFrameRecorder}, swept to all eight corners of the volume, measures its own known
+    * length correctly everywhere.
+    */
+   @Test
+   public void testG3CleanWandPassesAndExitsZero(@TempDir Path directory) throws IOException
+   {
+      Path capture = writeWandCapture(directory.resolve("wand.csv"), 0.0);
+      Output output = run("--gate",
+                          "g3",
+                          "--input",
+                          capture.toString(),
+                          "--sigma",
+                          Double.toString(SIGMA),
+                          "--marker-a",
+                          "WAND_1",
+                          "--marker-b",
+                          "WAND_2",
+                          "--known-length",
+                          Double.toString(WAND_LENGTH),
+                          "--min-samples",
+                          "30");
+
+      assertEquals(0, output.exitCode, () -> "Expected a pass:\n" + output);
+      assertTrue(output.out.contains("G3: PASS"), output.out);
+      assertTrue(output.out.contains("all 6 checks passed"), "Six sides: X-, X+, Y-, Y+, Z-, Z+:\n" + output.out);
+   }
+
+   /**
+    * A wand that reads 2 mm long specifically on the +X side of the volume fails there -- and, per
+    * {@code VolumeDistortionGateTest}'s own analysis, also on Y and Z, whose buckets each include
+    * half of the biased corners. Only X- is untouched by the fault (none of its corners have
+    * {@code x > 0}), so it is the one side that stays clean. This end-to-end test only pins down
+    * exit code and that X+ is named; the fine-grained per-side margins are the unit test's job.
+    */
+   @Test
+   public void testG3LocalizedDistortionFailsAndExitsNonZero(@TempDir Path directory) throws IOException
+   {
+      Path capture = writeWandCapture(directory.resolve("wand-distorted.csv"), 2.0e-3);
+      Output output = run("--gate",
+                          "g3",
+                          "--input",
+                          capture.toString(),
+                          "--sigma",
+                          Double.toString(SIGMA),
+                          "--marker-a",
+                          "WAND_1",
+                          "--marker-b",
+                          "WAND_2",
+                          "--known-length",
+                          Double.toString(WAND_LENGTH),
+                          "--min-samples",
+                          "30");
+
+      assertEquals(1, output.exitCode, () -> "A 2 mm bias on one side must exit non-zero:\n" + output);
+      assertTrue(output.out.contains("G3: FAIL"), output.out);
+      assertTrue(output.out.contains("X+"), "The table should name the side that failed:\n" + output.out);
+      assertTrue(output.out.contains("1 passed, 5 failed"), "Only X- never saw any biased corner:\n" + output.out);
+   }
+
+   @Test
+   public void testG3RequiresMarkersAndKnownLength(@TempDir Path directory) throws IOException
+   {
+      Path capture = writeWandCapture(directory.resolve("wand.csv"), 0.0);
+
+      Output missingMarkers = run("--gate", "g3", "--input", capture.toString(), "--sigma", Double.toString(SIGMA), "--known-length",
+                                 Double.toString(WAND_LENGTH));
+      assertEquals(2, missingMarkers.exitCode);
+      assertTrue(missingMarkers.err.contains("--marker-a"), missingMarkers.err);
+
+      Output missingLength = run("--gate",
+                                "g3",
+                                "--input",
+                                capture.toString(),
+                                "--sigma",
+                                Double.toString(SIGMA),
+                                "--marker-a",
+                                "WAND_1",
+                                "--marker-b",
+                                "WAND_2");
+      assertEquals(2, missingLength.exitCode);
+      assertTrue(missingLength.err.contains("--known-length"), missingLength.err);
+   }
+
+   /**
+    * Writes a wand capture swept to all eight corners of a 2x2x2 m cube about the origin, with
+    * {@code biasOnPositiveXMeters} added to the apparent length only at the four corners with
+    * {@code x > 0} -- mirrors {@code VolumeDistortionGateTest}'s corner sweep, but through the CSV
+    * round trip a real capture takes.
+    */
+   private static Path writeWandCapture(Path file, double biasOnPositiveXMeters) throws IOException
+   {
+      Random random = new Random(20260904L);
+      int samplesPerCorner = 25;
+      double extent = 1.0;
+
+      try (MocapFrameRecorder recorder = new MocapFrameRecorder(file, WAND_MARKERS))
+      {
+         MocapFrame frame = new MocapFrame(WAND_MARKERS);
+         long timestampNanoseconds = 1_000_000_000L;
+
+         for (int sx : new int[] {-1, 1})
+            for (int sy : new int[] {-1, 1})
+               for (int sz : new int[] {-1, 1})
+               {
+                  double bias = sx > 0 ? biasOnPositiveXMeters : 0.0;
+                  double half = (WAND_LENGTH + bias) / 2.0;
+                  double midX = sx * extent;
+                  double midY = sy * extent;
+                  double midZ = sz * extent;
+
+                  for (int i = 0; i < samplesPerCorner; i++)
+                  {
+                     frame.clear();
+                     frame.setTimestampNanoseconds(timestampNanoseconds);
+                     timestampNanoseconds += 5_000_000L;
+
+                     frame.get(0).setVisible(midX - half + SIGMA * random.nextGaussian(),
+                                             midY + SIGMA * random.nextGaussian(),
+                                             midZ + SIGMA * random.nextGaussian());
+                     frame.get(1).setVisible(midX + half + SIGMA * random.nextGaussian(),
+                                             midY + SIGMA * random.nextGaussian(),
+                                             midZ + SIGMA * random.nextGaussian());
+                     recorder.write(frame);
+                  }
+               }
+      }
+
+      return file;
+   }
+
    private static Path writeCapture(Path file, double totalDrift) throws IOException
    {
       return writeCapture(file, totalDrift, 600);

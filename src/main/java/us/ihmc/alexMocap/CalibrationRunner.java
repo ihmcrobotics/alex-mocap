@@ -25,23 +25,30 @@ import us.ihmc.alexMocap.gates.BootstrapSpreadGate;
 import us.ihmc.alexMocap.gates.GateRunner;
 import us.ihmc.alexMocap.gates.HeldOutResidualGate;
 import us.ihmc.alexMocap.gates.RigidityGate;
+import us.ihmc.alexMocap.gates.VolumeDistortionGate;
 import us.ihmc.alexMocap.mocap.CsvReplayMocapSource;
 import us.ihmc.alexMocap.model.RobotModelHandle;
 import us.ihmc.alexMocap.model.URDFLoader;
 import us.ihmc.euclid.axisAngle.AxisAngle;
 import us.ihmc.euclid.transform.RigidBodyTransform;
 import us.ihmc.euclid.transform.interfaces.RigidBodyTransformReadOnly;
+import us.ihmc.euclid.tuple3D.Point3D;
 
 /**
  * Command-line entry point for the offline calibration tooling.
  * <p>
- * Two modes. {@code --gate g1} runs the rigidity gate over a captured mocap CSV and needs nothing
- * else -- no URDF, no encoders. {@code --calibrate} runs A' over a capture set plus a URDF and
- * writes a {@code CalibrationResult}, then reports G2 and G4 on the result.
+ * Three modes. {@code --gate g1} runs the rigidity gate over a captured mocap CSV and needs nothing
+ * else -- no URDF, no encoders. {@code --gate g3} runs the volume-distortion gate over a SEPARATE
+ * capture of a rigid two-marker artifact swept through the room -- nothing mounted on the robot.
+ * {@code --calibrate} runs A' over a capture set plus a URDF and writes a {@code CalibrationResult},
+ * then reports G2 and G4 on the result.
  * </p>
  *
  * <pre>
  * CalibrationRunner --gate g1 --input capture.csv --sigma 0.0003
+ *
+ * CalibrationRunner --gate g3 --input wand.csv --marker-a WAND_1 --marker-b WAND_2 \
+ *                   --known-length 0.500 --sigma 0.0003
  *
  * CalibrationRunner --calibrate --input capture.csv --encoders encoders.csv \
  *                   --urdf robot.urdf --gauge pelvis --sigma 0.0003 --output calibration.json
@@ -307,12 +314,20 @@ public class CalibrationRunner
 
    private static int runGate(Arguments arguments, PrintStream out, PrintStream err) throws IOException
    {
-      if (!"g1".equals(arguments.gate))
+      return switch (arguments.gate)
       {
-         err.println("error: unknown gate '" + arguments.gate + "'. PR1 ships g1; g2 and g4 arrive with the calibrator.");
-         return EXIT_USAGE;
-      }
+         case "g1" -> runG1(arguments, out, err);
+         case "g3" -> runG3(arguments, out, err);
+         default ->
+         {
+            err.println("error: unknown gate '" + arguments.gate + "'. Standalone modes are g1 and g3; g2 and g4 run inside --calibrate.");
+            yield EXIT_USAGE;
+         }
+      };
+   }
 
+   private static int runG1(Arguments arguments, PrintStream out, PrintStream err) throws IOException
+   {
       if (!Files.isReadable(arguments.input))
       {
          err.println("error: cannot read " + arguments.input);
@@ -334,6 +349,76 @@ public class CalibrationRunner
          out.println();
 
          gate = new RigidityGate(clusters, arguments.sigma, arguments.sigmaMultiplier, arguments.minimumSamples);
+
+         MocapFrame frame = source.createFrame();
+
+         while (!source.isFinished())
+         {
+            if (source.read(frame))
+               gate.accumulate(frame);
+         }
+
+         frames = gate.getFramesAccumulated();
+      }
+
+      if (frames == 0)
+      {
+         err.println("error: " + arguments.input + " contains no frames.");
+         return EXIT_USAGE;
+      }
+
+      GateRunner.Report report = new GateRunner().add(gate).runAll();
+      out.print(report.format());
+
+      return report.isPassed() ? EXIT_PASS : EXIT_GATE_NOT_PASSED;
+   }
+
+   /**
+    * A separate capture from G1/G2/G4: a rigid two-marker artifact carried through the working
+    * volume, not anything mounted on the robot. Needs {@code --marker-a}, {@code --marker-b} and
+    * {@code --known-length} in addition to the shared {@code --input}/{@code --sigma}.
+    */
+   private static int runG3(Arguments arguments, PrintStream out, PrintStream err) throws IOException
+   {
+      if (!Files.isReadable(arguments.input))
+      {
+         err.println("error: cannot read " + arguments.input);
+         return EXIT_USAGE;
+      }
+      if (arguments.markerAName == null || arguments.markerBName == null)
+      {
+         err.println("error: --gate g3 needs --marker-a and --marker-b, the artifact's two markers.");
+         return EXIT_USAGE;
+      }
+      if (Double.isNaN(arguments.knownLengthMeters))
+      {
+         err.println("error: --gate g3 needs --known-length, the artifact's length measured independently of mocap (calipers).");
+         return EXIT_USAGE;
+      }
+
+      long frames;
+      VolumeDistortionGate gate;
+
+      try (CsvReplayMocapSource source = CsvReplayMocapSource.openWithHeaderMarkerSet(arguments.input))
+      {
+         List<MarkerId> markers = source.getMarkers();
+         MarkerId markerA = find(markers, arguments.markerAName);
+         MarkerId markerB = find(markers, arguments.markerBName);
+
+         out.println("input        " + arguments.input);
+         out.println("markers      " + markerA.getName() + ", " + markerB.getName());
+         out.println("known length " + String.format("%.4f mm", 1000.0 * arguments.knownLengthMeters));
+         out.println("sigma        " + String.format("%.4f mm per axis (measured)", 1000.0 * arguments.sigma));
+         out.println("centre       " + arguments.volumeCentre);
+         out.println();
+
+         gate = new VolumeDistortionGate(markerA,
+                                         markerB,
+                                         arguments.knownLengthMeters,
+                                         arguments.sigma,
+                                         arguments.sigmaMultiplier,
+                                         arguments.minimumSamples,
+                                         arguments.volumeCentre);
 
          MocapFrame frame = source.createFrame();
 
@@ -505,24 +590,38 @@ public class CalibrationRunner
    {
       stream.println("""
             Usage: CalibrationRunner --gate g1    --input <csv> --sigma <metres> [options]
+                   CalibrationRunner --gate g3    --input <csv> --marker-a <name>
+                                     --marker-b <name> --known-length <metres>
+                                     --sigma <metres> [options]
                    CalibrationRunner --calibrate --input <csv> --encoders <csv> --urdf <file>
                                      --sigma <metres> [options]
 
-            Mode 1 (--gate): runs a pre-flight gate over a captured mocap log. No URDF,
+            Mode 1 (--gate g1): runs a pre-flight gate over a captured mocap log. No URDF,
             no encoders. G1 is the gate to run first, always -- it is the only one that is
             purely a mocap-and-mounting question (FRAMEWORK.md §15).
 
-            Mode 2 (--calibrate): runs A' over a capture set plus a URDF, writes a
+            Mode 2 (--gate g3): runs the volume-distortion gate over a SEPARATE capture --
+            a rigid two-marker artifact carried through the working volume, nothing
+            mounted on the robot. Checks the measured length against a known ground
+            truth on all six sides of the volume, not merely at the centre (§15).
+
+            Mode 3 (--calibrate): runs A' over a capture set plus a URDF, writes a
             CalibrationResult, and reports G2 on the solved result.
 
             Required:
-              --gate <name>        gate to run: 'g1' (rigidity). Mode 1.
-              --calibrate          run the calibration. Mode 2.
+              --gate <name>        gate to run: 'g1' (rigidity) or 'g3' (volume distortion).
+              --calibrate          run the calibration. Mode 3.
               --input <file>       mocap CSV written by MocapFrameRecorder.
               --sigma <metres>     MEASURED per-axis mocap position noise at the gantry,
                                    e.g. 0.0003 for 0.3 mm. There is no default: the wand
                                    residual is an average over the whole lab and is not a
                                    substitute (FRAMEWORK.md §17, §20.1).
+
+            Required for --gate g3:
+              --marker-a <name>    one of the artifact's two markers.
+              --marker-b <name>    the other.
+              --known-length <metres>   the artifact's length, measured independently of
+                                   mocap (calipers) -- not something read off the capture.
 
             Required for --calibrate:
               --encoders <file>    encoder CSV (CsvEncoderLog). Rows are paired with the
@@ -531,6 +630,9 @@ public class CalibrationRunner
               --urdf <file>        the URDF to calibrate against.
 
             Optional:
+              --volume-centre <x,y,z>   G3 only: point (metres) samples are binned against
+                                   on each axis. Defaults to the world-frame origin, which
+                                   is normally right if ground-plane registration is done.
               --output <file>      write the CalibrationResult as JSON.
               --gauge <link>       link carrying the gauge cluster. Defaults to the URDF
                                    root link, which is what Delta = ^c T_b is defined
@@ -547,8 +649,10 @@ public class CalibrationRunner
               --sigma-multiplier <k>   threshold is k*sigma. Default 3 (FRAMEWORK.md §15).
                                    Note the noise floor is sqrt(2)*sigma, so k=3 is a 2.1x
                                    margin, not 3x.
-              --min-samples <n>    co-visible frames a pair needs before it is judged.
-                                   Default 100. Below this a pair is reported NOT EVALUATED.
+              --min-samples <n>    co-visible frames a pair (g1) or side (g3) needs before
+                                   it is judged. Default 100 (G1's own default; g3's
+                                   suggested minimum is looser, 30 -- set this explicitly
+                                   for a g3 run). Below this it is reported NOT EVALUATED.
               --holdout-every <n>  G4: hold out every nth capture (by index) from the fit,
                                    fit on the rest, and report how well that fit predicts
                                    the withheld ones. Default 5 (~20% held out). Must be
@@ -585,6 +689,12 @@ public class CalibrationRunner
       List<String> clusterSpecs = new ArrayList<>();
       boolean help = false;
 
+      // G3 only.
+      String markerAName;
+      String markerBName;
+      double knownLengthMeters = Double.NaN;
+      Point3D volumeCentre = new Point3D();
+
       static Arguments parse(String[] args)
       {
          Arguments arguments = new Arguments();
@@ -615,6 +725,10 @@ public class CalibrationRunner
                case "--holdout-every" -> arguments.holdoutEvery = positiveInt(value(args, ++i, "--holdout-every"), "--holdout-every");
                case "--g4-threshold" -> arguments.g4ThresholdMeters = positiveDouble(value(args, ++i, "--g4-threshold"), "--g4-threshold");
                case "--cluster" -> arguments.clusterSpecs.add(value(args, ++i, "--cluster"));
+               case "--marker-a" -> arguments.markerAName = value(args, ++i, "--marker-a");
+               case "--marker-b" -> arguments.markerBName = value(args, ++i, "--marker-b");
+               case "--known-length" -> arguments.knownLengthMeters = positiveDouble(value(args, ++i, "--known-length"), "--known-length");
+               case "--volume-centre" -> arguments.volumeCentre = parsePoint(value(args, ++i, "--volume-centre"));
                default -> throw new IllegalArgumentException("unknown option '" + args[i] + "'");
             }
          }
@@ -632,6 +746,24 @@ public class CalibrationRunner
             throw new IllegalArgumentException("--sigma is required and has no default; it must be measured at the gantry (FRAMEWORK.md §17)");
 
          return arguments;
+      }
+
+      /** Parses {@code "x,y,z"} in metres, for {@code --volume-centre}. */
+      private static Point3D parsePoint(String text)
+      {
+         String[] parts = text.split(",");
+
+         if (parts.length != 3)
+            throw new IllegalArgumentException("--volume-centre expects 'x,y,z' in metres, got '" + text + "'");
+
+         try
+         {
+            return new Point3D(Double.parseDouble(parts[0]), Double.parseDouble(parts[1]), Double.parseDouble(parts[2]));
+         }
+         catch (NumberFormatException e)
+         {
+            throw new IllegalArgumentException("--volume-centre expects 'x,y,z' in metres, got '" + text + "'");
+         }
       }
 
       private static String value(String[] args, int index, String option)

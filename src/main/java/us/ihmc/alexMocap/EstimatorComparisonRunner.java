@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
+import us.ihmc.alexMocap.core.NearestTimeMatcher;
 import us.ihmc.euclid.tuple3D.Point3D;
 import us.ihmc.euclid.tuple3D.Vector3D;
 import us.ihmc.euclid.tuple3D.interfaces.Vector3DReadOnly;
@@ -213,34 +214,30 @@ public class EstimatorComparisonRunner
    /**
     * Nearest-neighbour in time, not interpolation. Interpolating the estimator's own trajectory to
     * match ground-truth timestamps would smooth over exactly the estimator behaviour (e.g. a step
-    * change on contact) that this comparison exists to reveal.
+    * change on contact) that this comparison exists to reveal. The actual search is
+    * {@link NearestTimeMatcher} -- shared with {@code alex}'s NEES consistency checker, which needs
+    * the identical estimator-log samples aligned against ground truth for the same reason (see that
+    * class's javadoc) and must not carry a second copy of this bookkeeping (FRAMEWORK.md §2).
     */
    private static List<PoseErrorSample> matchPoses(List<PoseSample> truthPoses, List<EstimatorSample> estimatorSamples, long maxDeltaNanoseconds)
    {
       List<PoseErrorSample> errors = new ArrayList<>();
-      int searchStart = 0;
 
-      for (PoseSample truth : truthPoses)
+      for (NearestTimeMatcher.Matched<PoseSample, EstimatorSample> matched : NearestTimeMatcher.match(truthPoses,
+                                                                                                        estimatorSamples,
+                                                                                                        PoseSample::timestampNanoseconds,
+                                                                                                        estimate -> estimate.timestampNanoseconds,
+                                                                                                        maxDeltaNanoseconds))
       {
-         int nearestIndex = nearestIndex(estimatorSamples, truth.timestampNanoseconds, searchStart);
-
-         if (nearestIndex < 0)
-            continue;
-
-         EstimatorSample estimate = estimatorSamples.get(nearestIndex);
-         long deltaNanoseconds = Math.abs(estimate.timestampNanoseconds - truth.timestampNanoseconds);
-
-         if (deltaNanoseconds > maxDeltaNanoseconds)
-            continue;
-
-         searchStart = nearestIndex;
+         PoseSample truth = matched.truth();
+         EstimatorSample estimate = matched.candidate();
 
          Vector3D positionError = new Vector3D();
          positionError.sub(estimate.position, truth.position);
 
          double orientationErrorRadians = truth.orientation.distance(estimate.orientation);
 
-         errors.add(new PoseErrorSample(truth.timestampNanoseconds, deltaNanoseconds, positionError, orientationErrorRadians));
+         errors.add(new PoseErrorSample(truth.timestampNanoseconds, matched.timeDeltaNanoseconds(), positionError, orientationErrorRadians));
       }
 
       return errors;
@@ -249,58 +246,25 @@ public class EstimatorComparisonRunner
    private static List<TwistErrorSample> matchTwists(List<TwistSample> truthTwists, List<EstimatorSample> estimatorSamples, long maxDeltaNanoseconds)
    {
       List<TwistErrorSample> errors = new ArrayList<>();
-      int searchStart = 0;
 
-      for (TwistSample truth : truthTwists)
+      for (NearestTimeMatcher.Matched<TwistSample, EstimatorSample> matched : NearestTimeMatcher.match(truthTwists,
+                                                                                                         estimatorSamples,
+                                                                                                         TwistSample::timestampNanoseconds,
+                                                                                                         estimate -> estimate.timestampNanoseconds,
+                                                                                                         maxDeltaNanoseconds))
       {
-         int nearestIndex = nearestIndex(estimatorSamples, truth.timestampNanoseconds, searchStart);
-
-         if (nearestIndex < 0)
-            continue;
-
-         EstimatorSample estimate = estimatorSamples.get(nearestIndex);
-         long deltaNanoseconds = Math.abs(estimate.timestampNanoseconds - truth.timestampNanoseconds);
-
-         if (deltaNanoseconds > maxDeltaNanoseconds)
-            continue;
-
-         searchStart = nearestIndex;
+         TwistSample truth = matched.truth();
+         EstimatorSample estimate = matched.candidate();
 
          Vector3D linearError = new Vector3D();
          linearError.sub(estimate.linearVelocity, truth.linearVelocity);
          Vector3D angularError = new Vector3D();
          angularError.sub(estimate.angularVelocity, truth.angularVelocity);
 
-         errors.add(new TwistErrorSample(truth.timestampNanoseconds, deltaNanoseconds, linearError, angularError));
+         errors.add(new TwistErrorSample(truth.timestampNanoseconds, matched.timeDeltaNanoseconds(), linearError, angularError));
       }
 
       return errors;
-   }
-
-   /** Linear search from a moving lower bound -- both lists are time-ordered, so this is amortised O(n). */
-   private static int nearestIndex(List<EstimatorSample> estimatorSamples, long timestampNanoseconds, int searchStart)
-   {
-      int best = -1;
-      long bestDelta = Long.MAX_VALUE;
-
-      for (int i = Math.max(0, searchStart); i < estimatorSamples.size(); i++)
-      {
-         long delta = Math.abs(estimatorSamples.get(i).timestampNanoseconds - timestampNanoseconds);
-
-         if (delta < bestDelta)
-         {
-            bestDelta = delta;
-            best = i;
-         }
-         else if (estimatorSamples.get(i).timestampNanoseconds - timestampNanoseconds > bestDelta)
-         {
-            // Both lists are sorted by time, so once the estimator log has moved this far past the
-            // target the delta can only grow -- stop rather than scan the rest of the log per sample.
-            break;
-         }
-      }
-
-      return best;
    }
 
    // ---------------------------------------------------------------------------------------------

@@ -480,8 +480,13 @@ public class EstimatorComparisonRunner
 
          if (columns.length < 14)
          {
-            throw new IOException(file + ": expected 14 columns (timestamp_ns,x,y,z,qx,qy,qz,qs,vx,vy,vz,wx,wy,wz), got " + columns.length + ": " + line);
+            throw new IOException(file + ": expected at least 14 columns (timestamp_ns,x,y,z,qx,qy,qz,qs,vx,vy,vz,wx,wy,wz), got " + columns.length + ": "
+                  + line);
          }
+
+         // Columns past the 14th are ignored here on purpose, so an exporter may append its own
+         // without breaking this tool: NEES needs the filter's covariance, which this pose/twist
+         // schema has no room for and which a downstream consistency check reads from the same file.
 
          long timestampNanoseconds = Long.parseLong(columns[0]);
          Point3D position = new Point3D(Double.parseDouble(columns[1]), Double.parseDouble(columns[2]), Double.parseDouble(columns[3]));

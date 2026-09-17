@@ -108,6 +108,113 @@ public class EstimatorComparisonRunner
       }
    }
 
+   // ---------------------------------------------------------------------------------------------
+   // Programmatic API: the same comparison, as numbers rather than as a printed report.
+   // ---------------------------------------------------------------------------------------------
+
+   /**
+    * Compares one estimator log against mocap ground truth and returns the error statistics.
+    *
+    * <p>This is the CLI's own comparison with the printing and the per-sample CSV writing left out,
+    * for callers that need the numbers -- a multi-arm scoring table, most obviously, where re-deriving
+    * these statistics or scraping them back out of the printed report would be a second
+    * implementation of them (FRAMEWORK.md §2).</p>
+    *
+    * <p>Note what this deliberately does <b>not</b> do: it applies no IMU-to-pelvis correction, so the
+    * caller is asserting the estimator log is already in the pelvis-link frame. It also does not
+    * judge the match fraction -- {@link Comparison#poseMatchFraction()} is returned rather than
+    * enforced, because a caller scoring several arms wants to see a bad one in its table next to the
+    * good ones, not have the run aborted.</p>
+    */
+   public static Comparison compare(Path groundTruthPose, Path groundTruthVelocity, Path estimatorLog, long maxTimeDeltaNanoseconds)
+         throws IOException
+   {
+      List<PoseSample> truthPoses = readPoseCsv(groundTruthPose);
+      List<TwistSample> truthTwists = readTwistCsv(groundTruthVelocity);
+      List<EstimatorSample> estimatorSamples = readEstimatorCsv(estimatorLog);
+
+      if (truthPoses.isEmpty())
+         throw new IllegalArgumentException(groundTruthPose + " has no pose rows.");
+      if (estimatorSamples.isEmpty())
+         throw new IllegalArgumentException(estimatorLog + " has no rows.");
+
+      List<PoseErrorSample> poseErrors = matchPoses(truthPoses, estimatorSamples, maxTimeDeltaNanoseconds);
+      List<TwistErrorSample> twistErrors = matchTwists(truthTwists, estimatorSamples, maxTimeDeltaNanoseconds);
+
+      return new Comparison(poseErrors.size(),
+                            truthPoses.size(),
+                            twistErrors.size(),
+                            truthTwists.size(),
+                            Stats.of(poseErrors.stream().mapToDouble(e -> e.positionError.norm()).toArray()),
+                            Stats.of(poseErrors.stream().mapToDouble(e -> Math.toDegrees(e.orientationErrorRadians)).toArray()),
+                            Stats.of(twistErrors.stream().mapToDouble(e -> e.linearVelocityError.norm()).toArray()),
+                            Stats.of(twistErrors.stream().mapToDouble(e -> e.angularVelocityError.norm()).toArray()));
+   }
+
+   /**
+    * Error statistics from one estimator-log-versus-ground-truth comparison.
+    *
+    * <p>The match counts travel with the statistics on purpose. An error number computed from a
+    * handful of coincidental time matches is not a small-sample version of the right answer, it is a
+    * different quantity, and the fraction is the only thing that distinguishes them -- so a report
+    * built from this record can show them together rather than presenting a plausible number whose
+    * provenance has been dropped.</p>
+    */
+   public record Comparison(int matchedPoseSamples,
+                            int groundTruthPoseSamples,
+                            int matchedTwistSamples,
+                            int groundTruthTwistSamples,
+                            Stats positionErrorNorm,
+                            Stats orientationErrorDegrees,
+                            Stats linearVelocityErrorNorm,
+                            Stats angularVelocityErrorNorm)
+   {
+      public double poseMatchFraction()
+      {
+         return groundTruthPoseSamples == 0 ? Double.NaN : (double) matchedPoseSamples / groundTruthPoseSamples;
+      }
+
+      public double twistMatchFraction()
+      {
+         return groundTruthTwistSamples == 0 ? Double.NaN : (double) matchedTwistSamples / groundTruthTwistSamples;
+      }
+   }
+
+   /**
+    * Summary statistics of one error series. {@link #rmse()} is the paper number; {@link #max()} is
+    * the magnitude of the largest deviation, so it is never negative even when {@link #mean()} is.
+    *
+    * <p>Empty input gives all-NaN rather than zero: an unmatched arm has no error, and reporting 0.0
+    * would rank it best.</p>
+    */
+   public record Stats(double rmse, double mean, double max, double standardDeviation)
+   {
+      public static Stats of(double[] values)
+      {
+         if (values.length == 0)
+            return new Stats(Double.NaN, Double.NaN, Double.NaN, Double.NaN);
+
+         double sumOfSquares = 0.0;
+         double sum = 0.0;
+         double max = 0.0;
+
+         for (double value : values)
+         {
+            sumOfSquares += value * value;
+            sum += value;
+            max = Math.max(max, Math.abs(value));
+         }
+
+         double mean = sum / values.length;
+         double variance = 0.0;
+
+         for (double value : values)
+            variance += (value - mean) * (value - mean);
+
+         return new Stats(Math.sqrt(sumOfSquares / values.length), mean, max, Math.sqrt(variance / values.length));
+      }
+   }
+
    private static int compare(Arguments arguments, PrintStream out, PrintStream err) throws IOException
    {
       List<PoseSample> truthPoses = readPoseCsv(arguments.groundTruthPelvis);
@@ -321,27 +428,9 @@ public class EstimatorComparisonRunner
 
    private static void appendStatsRow(StringBuilder text, String label, double[] values, double scale)
    {
-      double sumOfSquares = 0.0;
-      double sum = 0.0;
-      double max = 0.0;
-
-      for (double value : values)
-      {
-         sumOfSquares += value * value;
-         sum += value;
-         max = Math.max(max, Math.abs(value));
-      }
-
-      double mean = sum / values.length;
-      double rmse = Math.sqrt(sumOfSquares / values.length);
-      double variance = 0.0;
-
-      for (double value : values)
-         variance += (value - mean) * (value - mean);
-
-      double std = Math.sqrt(variance / values.length);
-
-      text.append(String.format("  %-8s %10.4f %10.4f %10.4f %10.4f%n", label, scale * rmse, scale * mean, scale * max, scale * std));
+      Stats stats = Stats.of(values);
+      text.append(String.format("  %-8s %10.4f %10.4f %10.4f %10.4f%n",
+                                label, scale * stats.rmse(), scale * stats.mean(), scale * stats.max(), scale * stats.standardDeviation()));
    }
 
    private static void writeComparisonCsv(Path file, List<PoseErrorSample> errors) throws IOException

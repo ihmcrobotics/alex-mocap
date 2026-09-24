@@ -180,6 +180,88 @@ public class EstimatorComparisonRunnerTest
       assertTrue(output.out.contains("matched 3 of 3 velocity samples (100.0%)"), output.out);
    }
 
+   /**
+    * The hazard the body-frame columns exist for. The estimator's world is rotated 30 deg about
+    * gravity relative to mocap's -- an unobservable-yaw offset, not an estimator error -- and the
+    * estimate is otherwise PERFECT: same body attitude, same body-frame velocity and rate.
+    *
+    * <p>The world-frame columns must report the offset as error, exactly {@code |(Rz(30) - I) v|}, and
+    * the full orientation angle must read 30 deg. The body-frame columns and the tilt must read zero.
+    * If a future change routes the headline number back through world frame, this is what breaks.</p>
+    */
+   @Test
+   public void testAYawOffsetBetweenWorldsIsWorldFrameErrorButNotBodyFrameError(@TempDir Path directory) throws IOException
+   {
+      double yaw = Math.toRadians(30.0);
+      double qz = Math.sin(yaw / 2.0), qs = Math.cos(yaw / 2.0);
+      // truth: identity attitude, moving +x at 0.1 m/s, rolling at 0.3 rad/s
+      writePoseCsv(directory.resolve("pelvis.csv"), TIMESTAMPS_NS, 0.0, 0.0, 0.9, 0.0, 0.0, 0.0, 1.0);
+      writeVelocityCsv(directory.resolve("pelvisVelocity.csv"), TIMESTAMPS_NS, 0.1, 0.0, 0.0, 0.3, 0.0, 0.0);
+      // estimate: the same physical state seen from a world yawed by 30 deg
+      writeEstimatorCsv(directory.resolve("estimator.csv"), TIMESTAMPS_NS, 0.0, 0.0, 0.9, 0.0, 0.0, qz, qs,
+                        0.1 * Math.cos(yaw), 0.1 * Math.sin(yaw), 0.0, 0.3 * Math.cos(yaw), 0.3 * Math.sin(yaw), 0.0);
+
+      EstimatorComparisonRunner.Comparison comparison = EstimatorComparisonRunner.compare(directory.resolve("pelvis.csv"),
+                                                                                          directory.resolve("pelvisVelocity.csv"),
+                                                                                          directory.resolve("estimator.csv"),
+                                                                                          1_000_000L);
+
+      double worldLinear = 0.1 * 2.0 * Math.sin(yaw / 2.0);
+      double worldAngular = 0.3 * 2.0 * Math.sin(yaw / 2.0);
+      assertEquals(worldLinear, comparison.linearVelocityErrorNorm().rmse(), 1e-12, "world-frame velocity must see the yaw offset");
+      assertEquals(worldAngular, comparison.angularVelocityErrorNorm().rmse(), 1e-12, "world-frame rate must see the yaw offset");
+      assertEquals(30.0, comparison.orientationErrorDegrees().rmse(), 1e-9, "the full orientation angle includes yaw");
+
+      assertEquals(0.0, comparison.bodyLinearVelocityErrorNorm().rmse(), 1e-12, "a yaw offset between worlds is not a body-frame velocity error");
+      assertEquals(0.0, comparison.bodyAngularVelocityErrorNorm().rmse(), 1e-12, "a yaw offset between worlds is not a body-frame rate error");
+      assertEquals(0.0, comparison.tiltErrorDegrees().rmse(), 1e-9, "a yaw offset between worlds is not a tilt error");
+   }
+
+   /**
+    * The other direction: a genuine error must still show up in body frame. A 0.05 m/s forward-speed
+    * error, with the worlds yawed 30 deg apart, reads exactly 0.05 in body frame -- the offset does
+    * not leak in, and the real error does not leak out.
+    */
+   @Test
+   public void testARealVelocityErrorSurvivesTheYawCancellationExactly(@TempDir Path directory) throws IOException
+   {
+      double yaw = Math.toRadians(30.0);
+      double qz = Math.sin(yaw / 2.0), qs = Math.cos(yaw / 2.0);
+      writePoseCsv(directory.resolve("pelvis.csv"), TIMESTAMPS_NS, 0.0, 0.0, 0.9, 0.0, 0.0, 0.0, 1.0);
+      writeVelocityCsv(directory.resolve("pelvisVelocity.csv"), TIMESTAMPS_NS, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0);
+      writeEstimatorCsv(directory.resolve("estimator.csv"), TIMESTAMPS_NS, 0.0, 0.0, 0.9, 0.0, 0.0, qz, qs,
+                        0.15 * Math.cos(yaw), 0.15 * Math.sin(yaw), 0.0, 0.0, 0.0, 0.0);
+
+      EstimatorComparisonRunner.Comparison comparison = EstimatorComparisonRunner.compare(directory.resolve("pelvis.csv"),
+                                                                                          directory.resolve("pelvisVelocity.csv"),
+                                                                                          directory.resolve("estimator.csv"),
+                                                                                          1_000_000L);
+
+      assertEquals(0.05, comparison.bodyLinearVelocityErrorNorm().rmse(), 1e-12);
+   }
+
+   /** Tilt is the roll/pitch part of attitude error: a pure 2 deg pitch error reads 2 deg, and yaw adds nothing. */
+   @Test
+   public void testTiltErrorRecoversPitchAndIgnoresYaw(@TempDir Path directory) throws IOException
+   {
+      double pitch = Math.toRadians(2.0);
+      double yaw = Math.toRadians(40.0);
+      // q = qz(yaw) * qy(pitch)
+      double cy = Math.cos(yaw / 2.0), sy = Math.sin(yaw / 2.0), cp = Math.cos(pitch / 2.0), sp = Math.sin(pitch / 2.0);
+      double qs = cy * cp, qx = -sy * sp, qy = cy * sp, qz = sy * cp;
+      writePoseCsv(directory.resolve("pelvis.csv"), TIMESTAMPS_NS, 0.0, 0.0, 0.9, 0.0, 0.0, 0.0, 1.0);
+      writeVelocityCsv(directory.resolve("pelvisVelocity.csv"), TIMESTAMPS_NS, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+      writeEstimatorCsv(directory.resolve("estimator.csv"), TIMESTAMPS_NS, 0.0, 0.0, 0.9, qx, qy, qz, qs, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+      EstimatorComparisonRunner.Comparison comparison = EstimatorComparisonRunner.compare(directory.resolve("pelvis.csv"),
+                                                                                          directory.resolve("pelvisVelocity.csv"),
+                                                                                          directory.resolve("estimator.csv"),
+                                                                                          1_000_000L);
+
+      assertEquals(2.0, comparison.tiltErrorDegrees().rmse(), 1e-9, "tilt must be exactly the pitch error, with the 40 deg yaw removed");
+      assertTrue(comparison.orientationErrorDegrees().rmse() > 39.0, "the full angle still carries the yaw");
+   }
+
    // ---------------------------------------------------------------------------------------------
    // Fixtures
    // ---------------------------------------------------------------------------------------------

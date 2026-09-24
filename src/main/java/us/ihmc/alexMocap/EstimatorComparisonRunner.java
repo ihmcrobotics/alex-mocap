@@ -58,6 +58,30 @@ import us.ihmc.euclid.tuple4D.Quaternion;
  * velocity error, which is exactly the failure mode this option exists to let a caller correct for
  * rather than silently commit to a guess.
  * </p>
+ *
+ * <h2>World-frame velocity is NOT alignment-free: the body-frame columns</h2>
+ * <p>
+ * Velocity does not depend on where the two world frames put their <em>origin</em>, and consumers of
+ * this tool took that to mean it does not depend on their alignment at all. It does: it depends on
+ * their relative <b>yaw</b>. If the estimator's world is rotated by ψ about gravity relative to the
+ * mocap world, the world-frame error is {@code (Rz(ψ) - I) v}, which grows with speed and with ψ. An
+ * invariant EKF's global yaw is unobservable and drifts, and the mocap-to-robot yaw registration has
+ * a history of large offsets, so this is not a small-print hazard.
+ * </p>
+ * <p>
+ * The body-frame columns remove it: {@code e_v = R_estᵀ v_est − R_trueᵀ v_true}, and likewise for ω.
+ * A yaw offset between the worlds rotates both {@code R} and {@code v} on one side together, so it
+ * cancels exactly. This is the quantity the offline training objective uses ({@code body_velocity_l2}),
+ * so a number fitted there and a number scored here now mean the same thing. The attitude counterpart
+ * is the <b>tilt</b> error -- the angle between the two estimated gravity directions in body frame --
+ * which is the observable (roll/pitch) part of the orientation error; the full quaternion angle
+ * includes yaw and has the same alignment dependence as position.
+ * </p>
+ * <p>
+ * Body-frame twist needs the ground-truth orientation at each ground-truth twist sample. Both come
+ * from the same {@code ReplayRunner} run and share timestamps; a twist sample with no pose sample
+ * within the time tolerance is dropped and counts against the twist match fraction.
+ * </p>
  */
 public class EstimatorComparisonRunner
 {
@@ -139,7 +163,7 @@ public class EstimatorComparisonRunner
          throw new IllegalArgumentException(estimatorLog + " has no rows.");
 
       List<PoseErrorSample> poseErrors = matchPoses(truthPoses, estimatorSamples, maxTimeDeltaNanoseconds);
-      List<TwistErrorSample> twistErrors = matchTwists(truthTwists, estimatorSamples, maxTimeDeltaNanoseconds);
+      List<TwistErrorSample> twistErrors = matchTwists(truthTwists, truthPoses, estimatorSamples, maxTimeDeltaNanoseconds);
 
       return new Comparison(poseErrors.size(),
                             truthPoses.size(),
@@ -148,11 +172,19 @@ public class EstimatorComparisonRunner
                             Stats.of(poseErrors.stream().mapToDouble(e -> e.positionError.norm()).toArray()),
                             Stats.of(poseErrors.stream().mapToDouble(e -> Math.toDegrees(e.orientationErrorRadians)).toArray()),
                             Stats.of(twistErrors.stream().mapToDouble(e -> e.linearVelocityError.norm()).toArray()),
-                            Stats.of(twistErrors.stream().mapToDouble(e -> e.angularVelocityError.norm()).toArray()));
+                            Stats.of(twistErrors.stream().mapToDouble(e -> e.angularVelocityError.norm()).toArray()),
+                            Stats.of(poseErrors.stream().mapToDouble(e -> Math.toDegrees(e.tiltErrorRadians)).toArray()),
+                            Stats.of(twistErrors.stream().mapToDouble(e -> e.bodyLinearVelocityError.norm()).toArray()),
+                            Stats.of(twistErrors.stream().mapToDouble(e -> e.bodyAngularVelocityError.norm()).toArray()));
    }
 
    /**
     * Error statistics from one estimator-log-versus-ground-truth comparison.
+    *
+    * <p>Only {@link #tiltErrorDegrees}, {@link #bodyLinearVelocityErrorNorm} and
+    * {@link #bodyAngularVelocityErrorNorm} are independent of the relative yaw between the estimator's
+    * and mocap's world frames; see the class javadoc. Position, full orientation and the world-frame
+    * twist statistics all assume the two worlds are aligned, and an invariant EKF's yaw is not.</p>
     *
     * <p>The match counts travel with the statistics on purpose. An error number computed from a
     * handful of coincidental time matches is not a small-sample version of the right answer, it is a
@@ -167,7 +199,10 @@ public class EstimatorComparisonRunner
                             Stats positionErrorNorm,
                             Stats orientationErrorDegrees,
                             Stats linearVelocityErrorNorm,
-                            Stats angularVelocityErrorNorm)
+                            Stats angularVelocityErrorNorm,
+                            Stats tiltErrorDegrees,
+                            Stats bodyLinearVelocityErrorNorm,
+                            Stats bodyAngularVelocityErrorNorm)
    {
       public double poseMatchFraction()
       {
@@ -242,7 +277,7 @@ public class EstimatorComparisonRunner
       out.println();
 
       List<PoseErrorSample> poseErrors = matchPoses(truthPoses, estimatorSamples, arguments.maxTimeDeltaNanoseconds);
-      List<TwistErrorSample> twistErrors = matchTwists(truthTwists, estimatorSamples, arguments.maxTimeDeltaNanoseconds);
+      List<TwistErrorSample> twistErrors = matchTwists(truthTwists, truthPoses, estimatorSamples, arguments.maxTimeDeltaNanoseconds);
 
       double poseMatchFraction = truthPoses.isEmpty() ? 0.0 : (double) poseErrors.size() / truthPoses.size();
       double twistMatchFraction = truthTwists.isEmpty() ? Double.NaN : (double) twistErrors.size() / truthTwists.size();
@@ -343,24 +378,51 @@ public class EstimatorComparisonRunner
          positionError.sub(estimate.position, truth.position);
 
          double orientationErrorRadians = truth.orientation.distance(estimate.orientation);
+         double tiltErrorRadians = tiltError(truth.orientation, estimate.orientation);
 
-         errors.add(new PoseErrorSample(truth.timestampNanoseconds, matched.timeDeltaNanoseconds(), positionError, orientationErrorRadians));
+         errors.add(new PoseErrorSample(truth.timestampNanoseconds,
+                                        matched.timeDeltaNanoseconds(),
+                                        positionError,
+                                        orientationErrorRadians,
+                                        tiltErrorRadians));
       }
 
       return errors;
    }
 
-   private static List<TwistErrorSample> matchTwists(List<TwistSample> truthTwists, List<EstimatorSample> estimatorSamples, long maxDeltaNanoseconds)
+   /**
+    * Twist errors in both frames. The world-frame pair is kept for continuity and for debugging a
+    * registration; the body-frame pair is the one to report, because a yaw offset between the two
+    * world frames cancels out of it exactly (class javadoc).
+    */
+   private static List<TwistErrorSample> matchTwists(List<TwistSample> truthTwists,
+                                                     List<PoseSample> truthPoses,
+                                                     List<EstimatorSample> estimatorSamples,
+                                                     long maxDeltaNanoseconds)
    {
+      // Ground-truth orientation for each ground-truth twist sample. Same ReplayRunner run, so the
+      // timestamps coincide; the tolerance only guards against a mis-paired file.
+      List<OrientedTwistSample> orientedTruth = new ArrayList<>();
+
+      for (NearestTimeMatcher.Matched<TwistSample, PoseSample> matched : NearestTimeMatcher.match(truthTwists,
+                                                                                                    truthPoses,
+                                                                                                    TwistSample::timestampNanoseconds,
+                                                                                                    PoseSample::timestampNanoseconds,
+                                                                                                    maxDeltaNanoseconds))
+      {
+         TwistSample twist = matched.truth();
+         orientedTruth.add(new OrientedTwistSample(twist.timestampNanoseconds, twist.linearVelocity, twist.angularVelocity, matched.candidate().orientation));
+      }
+
       List<TwistErrorSample> errors = new ArrayList<>();
 
-      for (NearestTimeMatcher.Matched<TwistSample, EstimatorSample> matched : NearestTimeMatcher.match(truthTwists,
-                                                                                                         estimatorSamples,
-                                                                                                         TwistSample::timestampNanoseconds,
-                                                                                                         estimate -> estimate.timestampNanoseconds,
-                                                                                                         maxDeltaNanoseconds))
+      for (NearestTimeMatcher.Matched<OrientedTwistSample, EstimatorSample> matched : NearestTimeMatcher.match(orientedTruth,
+                                                                                                                 estimatorSamples,
+                                                                                                                 OrientedTwistSample::timestampNanoseconds,
+                                                                                                                 estimate -> estimate.timestampNanoseconds,
+                                                                                                                 maxDeltaNanoseconds))
       {
-         TwistSample truth = matched.truth();
+         OrientedTwistSample truth = matched.truth();
          EstimatorSample estimate = matched.candidate();
 
          Vector3D linearError = new Vector3D();
@@ -368,10 +430,54 @@ public class EstimatorComparisonRunner
          Vector3D angularError = new Vector3D();
          angularError.sub(estimate.angularVelocity, truth.angularVelocity);
 
-         errors.add(new TwistErrorSample(truth.timestampNanoseconds, matched.timeDeltaNanoseconds(), linearError, angularError));
+         Vector3D bodyLinearError = bodyFrameDifference(estimate.orientation, estimate.linearVelocity, truth.orientation, truth.linearVelocity);
+         Vector3D bodyAngularError = bodyFrameDifference(estimate.orientation, estimate.angularVelocity, truth.orientation, truth.angularVelocity);
+
+         errors.add(new TwistErrorSample(truth.timestampNanoseconds,
+                                         matched.timeDeltaNanoseconds(),
+                                         linearError,
+                                         angularError,
+                                         bodyLinearError,
+                                         bodyAngularError));
       }
 
       return errors;
+   }
+
+   /**
+    * {@code R_estᵀ a_est − R_trueᵀ a_true}: each world-frame vector expressed in its own estimate of the
+    * body frame, then differenced. A common rotation about gravity applied to one side's {@code R} and
+    * vector together leaves its body-frame vector unchanged, which is the whole point.
+    */
+   static Vector3D bodyFrameDifference(Quaternion estimateOrientation, Vector3D estimateWorld, Quaternion truthOrientation, Vector3D truthWorld)
+   {
+      Vector3D estimateBody = new Vector3D();
+      estimateOrientation.inverseTransform(estimateWorld, estimateBody);
+      Vector3D truthBody = new Vector3D();
+      truthOrientation.inverseTransform(truthWorld, truthBody);
+
+      Vector3D difference = new Vector3D();
+      difference.sub(estimateBody, truthBody);
+      return difference;
+   }
+
+   /**
+    * Angle between the two estimates of the gravity direction, each in its own body frame -- the
+    * roll/pitch part of the attitude error. {@code Rz(ψ) e_z = e_z}, so a yaw offset between the worlds
+    * does not appear here, while it does appear in {@link Quaternion#distance}.
+    */
+   static double tiltError(Quaternion truthOrientation, Quaternion estimateOrientation)
+   {
+      Vector3D up = new Vector3D(0.0, 0.0, 1.0);
+      Vector3D truthUpInBody = new Vector3D();
+      truthOrientation.inverseTransform(up, truthUpInBody);
+      Vector3D estimateUpInBody = new Vector3D();
+      estimateOrientation.inverseTransform(up, estimateUpInBody);
+
+      Vector3D cross = new Vector3D();
+      cross.cross(truthUpInBody, estimateUpInBody);
+      // atan2 rather than acos: acos loses all precision near zero, which is where a good estimator lives.
+      return Math.atan2(cross.norm(), truthUpInBody.dot(estimateUpInBody));
    }
 
    // ---------------------------------------------------------------------------------------------
@@ -397,8 +503,11 @@ public class EstimatorComparisonRunner
       appendStatsRow(text, "z", z, 1000.0);
       appendStatsRow(text, "norm", norm, 1000.0);
       text.append('\n');
-      text.append("orientation error (deg)\n");
+      text.append("orientation error (deg) -- full angle includes yaw and assumes the world frames are aligned\n");
       appendStatsRow(text, "angle", orientationDegrees, 1.0);
+      text.append('\n');
+      text.append("tilt error (deg) -- roll/pitch only, independent of world-frame yaw\n");
+      appendStatsRow(text, "tilt", errors.stream().mapToDouble(e -> Math.toDegrees(e.tiltErrorRadians)).toArray(), 1.0);
 
       return text.toString();
    }
@@ -412,7 +521,17 @@ public class EstimatorComparisonRunner
       double[] wnorm = errors.stream().mapToDouble(e -> e.angularVelocityError.norm()).toArray();
 
       StringBuilder text = new StringBuilder();
-      text.append("linear velocity error (m/s) -- this is FRAMEWORK.md section 13's accuracy claim, not the pose error above\n");
+      text.append("linear velocity error, BODY frame (m/s) -- the accuracy claim; independent of world-frame yaw\n");
+      text.append(String.format("  %-8s %10s %10s %10s %10s%n", "", "rmse", "mean", "max", "std"));
+      appendStatsRow(text, "vx_b", errors.stream().mapToDouble(e -> e.bodyLinearVelocityError.getX()).toArray(), 1.0);
+      appendStatsRow(text, "vy_b", errors.stream().mapToDouble(e -> e.bodyLinearVelocityError.getY()).toArray(), 1.0);
+      appendStatsRow(text, "vz_b", errors.stream().mapToDouble(e -> e.bodyLinearVelocityError.getZ()).toArray(), 1.0);
+      appendStatsRow(text, "norm_b", errors.stream().mapToDouble(e -> e.bodyLinearVelocityError.norm()).toArray(), 1.0);
+      text.append('\n');
+      text.append("angular velocity error, BODY frame (rad/s)\n");
+      appendStatsRow(text, "w_b", errors.stream().mapToDouble(e -> e.bodyAngularVelocityError.norm()).toArray(), 1.0);
+      text.append('\n');
+      text.append("linear velocity error, WORLD frame (m/s) -- assumes the estimator and mocap worlds share a yaw\n");
       text.append(String.format("  %-8s %10s %10s %10s %10s%n", "", "rmse", "mean", "max", "std"));
       appendStatsRow(text, "vx", vx, 1.0);
       appendStatsRow(text, "vy", vy, 1.0);
@@ -438,12 +557,13 @@ public class EstimatorComparisonRunner
       try (BufferedWriter writer = Files.newBufferedWriter(file, StandardCharsets.UTF_8))
       {
          writer.write("# per-matched-sample pose error, ground truth minus... no: estimator minus ground truth. Positive means the estimator is ahead.\n");
-         writer.write("timestamp_ns,time_delta_ns,error_x,error_y,error_z,error_norm,orientation_error_deg\n");
+         writer.write("timestamp_ns,time_delta_ns,error_x,error_y,error_z,error_norm,orientation_error_deg,tilt_error_deg\n");
 
          for (PoseErrorSample error : errors)
          {
             writer.write(error.timestampNanoseconds + "," + error.timeDeltaNanoseconds + "," + error.positionError.getX() + "," + error.positionError.getY()
-                        + "," + error.positionError.getZ() + "," + error.positionError.norm() + "," + Math.toDegrees(error.orientationErrorRadians) + "\n");
+                        + "," + error.positionError.getZ() + "," + error.positionError.norm() + "," + Math.toDegrees(error.orientationErrorRadians)
+                        + "," + Math.toDegrees(error.tiltErrorRadians) + "\n");
          }
       }
    }
@@ -453,14 +573,17 @@ public class EstimatorComparisonRunner
       try (BufferedWriter writer = Files.newBufferedWriter(file, StandardCharsets.UTF_8))
       {
          writer.write("# per-matched-sample velocity error, estimator minus ground truth.\n");
-         writer.write("timestamp_ns,time_delta_ns,verror_x,verror_y,verror_z,verror_norm,werror_x,werror_y,werror_z,werror_norm\n");
+         writer.write("timestamp_ns,time_delta_ns,verror_x,verror_y,verror_z,verror_norm,werror_x,werror_y,werror_z,werror_norm,"
+                      + "body_verror_x,body_verror_y,body_verror_z,body_verror_norm,body_werror_norm\n");
 
          for (TwistErrorSample error : errors)
          {
             writer.write(error.timestampNanoseconds + "," + error.timeDeltaNanoseconds + "," + error.linearVelocityError.getX() + ","
                         + error.linearVelocityError.getY() + "," + error.linearVelocityError.getZ() + "," + error.linearVelocityError.norm() + ","
                         + error.angularVelocityError.getX() + "," + error.angularVelocityError.getY() + "," + error.angularVelocityError.getZ() + ","
-                        + error.angularVelocityError.norm() + "\n");
+                        + error.angularVelocityError.norm() + "," + error.bodyLinearVelocityError.getX() + "," + error.bodyLinearVelocityError.getY() + ","
+                        + error.bodyLinearVelocityError.getZ() + "," + error.bodyLinearVelocityError.norm() + "," + error.bodyAngularVelocityError.norm()
+                        + "\n");
          }
       }
    }
@@ -603,11 +726,24 @@ public class EstimatorComparisonRunner
       }
    }
 
-   private record PoseErrorSample(long timestampNanoseconds, long timeDeltaNanoseconds, Vector3D positionError, double orientationErrorRadians)
+   private record OrientedTwistSample(long timestampNanoseconds, Vector3D linearVelocity, Vector3D angularVelocity, Quaternion orientation)
    {
    }
 
-   private record TwistErrorSample(long timestampNanoseconds, long timeDeltaNanoseconds, Vector3D linearVelocityError, Vector3D angularVelocityError)
+   private record PoseErrorSample(long timestampNanoseconds,
+                                  long timeDeltaNanoseconds,
+                                  Vector3D positionError,
+                                  double orientationErrorRadians,
+                                  double tiltErrorRadians)
+   {
+   }
+
+   private record TwistErrorSample(long timestampNanoseconds,
+                                   long timeDeltaNanoseconds,
+                                   Vector3D linearVelocityError,
+                                   Vector3D angularVelocityError,
+                                   Vector3D bodyLinearVelocityError,
+                                   Vector3D bodyAngularVelocityError)
    {
    }
 
